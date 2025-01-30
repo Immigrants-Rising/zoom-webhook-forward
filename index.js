@@ -2,12 +2,13 @@ const functions = require('@google-cloud/functions-framework');
 const express = require('express');
 const bodyParser = require('body-parser');
 const crypto = require('crypto');
+const axios = require('axios');
 
 const app = express();
 
 app.use(bodyParser.json());
 
-app.post('/', (req, res) => {
+app.post('/', async (req, res) => {
   var response;
 
   console.log(req.headers);
@@ -48,7 +49,17 @@ app.post('/', (req, res) => {
       res.status(response.status);
       res.json(response);
 
-      // business logic here, example make API request to Zoom or 3rd party
+      // Forward the webhook to another endpoint
+      try {
+        await axios.post(process.env.FORWARD_WEBHOOK_URL, req.body, {
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+        console.log('Webhook forwarded successfully');
+      } catch (error) {
+        console.error('Error forwarding webhook:', error);
+      }
     }
   } else {
     response = { message: 'Unauthorized request to Zoom Webhook sample.', status: 401 };

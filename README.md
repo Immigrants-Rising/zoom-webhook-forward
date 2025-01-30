@@ -1,3 +1,7 @@
+# About this fork
+
+This fork makes it so that when you catch the webhook, you can forward it to an arbitrary endpoint. Additionally, you can deploy this as a Google Cloud Function using the functions-framework.
+
 # Zoom Webhook sample
 
 Use of this sample app is subject to our [Terms of Use](https://explore.zoom.us/en/legal/zoom-api-license-and-tou/).

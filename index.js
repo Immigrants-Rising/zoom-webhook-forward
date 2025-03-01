@@ -65,12 +65,12 @@ function mapWebhookDataToAirtableRecord(webhookData) {
 // Function to save record to Airtable
 async function saveToAirtable(record) {
   try {
-    // Get table name from environment variable, or default to 'Webinar Participants'
-    const tableName = process.env.AIRTABLE_TABLE_NAME || 'Webinar Participants';
+    // Get table name from environment variables
+    const tableName = process.env.AIRTABLE_TABLE_ID;
     const table = base(tableName);
     
     // Create a record in Airtable
-    const result = await table.create({ fields: record });
+    const result = await table.create([{ fields: record }]);
     console.log('Record saved to Airtable:', result.getId());
     return result;
   } catch (error) {
@@ -115,7 +115,7 @@ app.post('/', async (req, res) => {
       res.status(response.status);
       res.json(response.message);
     } else {
-      response = { message: 'Authorized request to Zoom Webhook sample.', status: 200 };
+      response = { message: 'Authorized request to Zoom Webhook Catcher.', status: 200 };
 
       console.log(response.message);
 
@@ -124,12 +124,14 @@ app.post('/', async (req, res) => {
 
       // Forward the webhook to another endpoint
       try {
-        await axios.post(process.env.FORWARD_WEBHOOK_URL, req.body, {
-          headers: {
-            'Content-Type': 'application/json'
-          }
-        });
-        console.log('Webhook forwarded successfully');
+        if (process.env.FORWARD_WEBHOOK_URL) {
+          await axios.post(process.env.FORWARD_WEBHOOK_URL, req.body, {
+            headers: {
+              'Content-Type': 'application/json'
+            }
+          });
+          console.log('Webhook forwarded successfully');
+        }
         
         // Save data to Airtable if it's a relevant event
         if (req.body.event === 'webinar.participant_joined' || 
@@ -149,7 +151,7 @@ app.post('/', async (req, res) => {
       }
     }
   } else {
-    response = { message: 'Unauthorized request to Zoom Webhook sample.', status: 401 };
+    response = { message: 'Unauthorized request to Zoom Webhook Catcher.', status: 401 };
 
     console.log(response.message);
 

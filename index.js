@@ -19,7 +19,6 @@ function mapWebhookDataToAirtableRecord(webhookData) {
   
   // Base record with common fields
   const record = {
-    "ID": participant.id,
     "Event Type": eventType,
     "Event Timestamp": webhookData.event_ts,
     "Account ID": payload.account_id,
@@ -37,6 +36,8 @@ function mapWebhookDataToAirtableRecord(webhookData) {
     "Participant UUID": participant.participant_uuid,
     "Email": participant.email,
     "Registrant ID": participant.registrant_id,
+    // This seems to be the same as participant.id
+    // Let's keep it for now, but we may remove it later
     "Participant User ID Alt": participant.participant_user_id,
     "Customer Key": participant.customer_key,
     "Phone Number": participant.phone_number

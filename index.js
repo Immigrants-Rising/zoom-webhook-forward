@@ -9,6 +9,8 @@ const app = express();
 
 // Configure Airtable
 const base = new Airtable({apiKey: process.env.AIRTABLE_API_KEY}).base(process.env.AIRTABLE_BASE_ID);
+const tableName = process.env.AIRTABLE_TABLE_ID;
+const table = base(tableName);
 
 // Function to map webhook data to Airtable record
 function mapWebhookDataToAirtableRecord(webhookData) {
@@ -66,17 +68,20 @@ function mapWebhookDataToAirtableRecord(webhookData) {
 // Function to save record to Airtable
 async function saveToAirtable(record) {
   try {
-    // Get table name from environment variables
-    const tableName = process.env.AIRTABLE_TABLE_ID;
-    const table = base(tableName);
-    
-    // Create a record in Airtable
-    const result = await table.create([{ fields: record }]);
-    console.log('Record saved to Airtable:', result.getId());
-    return result;
+    // Save the record to Airtable
+    table.create(
+      [{ fields: record }],
+      function (err, records) {
+        if (err) {
+          throw err;
+        }
+        records.forEach(function (record) {
+          console.log('Record saved to Airtable:', record.getId());
+        });
+      }
+    )
   } catch (error) {
     console.error('Error saving to Airtable:', error);
-    throw error;
   }
 }
 

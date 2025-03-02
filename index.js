@@ -4,13 +4,41 @@ const bodyParser = require('body-parser');
 const crypto = require('crypto');
 const axios = require('axios');
 const Airtable = require('airtable');
+const yaml = require('js-yaml');
+const fs = require('fs');
 
 const app = express();
 
-// Configure Airtable
-const base = new Airtable({apiKey: process.env.AIRTABLE_API_KEY}).base(process.env.AIRTABLE_BASE_ID);
-const tableName = process.env.AIRTABLE_TABLE_ID;
-const table = base(tableName);
+// Load configuration from YAML file
+function loadConfig() {
+  try {
+    const configFile = process.env.CONFIG_FILE_PATH || './config.yaml';
+    const fileContents = fs.readFileSync(configFile, 'utf8');
+    return yaml.load(fileContents);
+  } catch (e) {
+    console.error('Error loading configuration:', e);
+    return { bases: [] };
+  }
+}
+
+// Function to determine which base to use based on meeting topic
+function determineTargetBases(meetingTopic, config) {
+  const matchingBases = [];
+  
+  for (const base of config.bases) {
+    // If the base has no condition, or if it meets the condition
+    if (!base.condition || meetingTopic.match(new RegExp(base.condition, 'i'))) {
+      // Set default priority if not specified
+      if (base.priority === undefined) {
+        base.priority = 100;
+      }
+      matchingBases.push(base);
+    }
+  }
+  
+  // Sort bases by priority (lower numbers first)
+  return matchingBases.sort((a, b) => (a.priority || 100) - (b.priority || 100));
+}
 
 // Function to map webhook data to Airtable record
 function mapWebhookDataToAirtableRecord(webhookData) {
@@ -38,8 +66,6 @@ function mapWebhookDataToAirtableRecord(webhookData) {
     "Participant UUID": participant.participant_uuid,
     "Email": participant.email,
     "Registrant ID": participant.registrant_id,
-    // This seems to be the same as participant.id
-    // Let's keep it for now, but we may remove it later
     "Participant User ID Alt": participant.participant_user_id,
     "Customer Key": participant.customer_key,
     "Phone Number": participant.phone_number
@@ -47,14 +73,12 @@ function mapWebhookDataToAirtableRecord(webhookData) {
   
   // Handle event-specific fields
   if (eventType === "webinar.participant_joined") {
-    // Map join_time to Event Datetime
     record["Event Datetime"] = participant.join_time;
   } else if (eventType === "webinar.participant_left") {
     record["Leave Time"] = participant.leave_time;
     record["Leave Reason"] = participant.leave_reason;
     record["Event Datetime"] = participant.leave_time;
   } else if (eventType === "meeting.participant_joined") {
-    // For meeting joins, use date_time field
     record["Event Datetime"] = participant.date_time;
   } else if (eventType === "meeting.participant_left") {
     record["Leave Time"] = participant.leave_time;
@@ -65,23 +89,57 @@ function mapWebhookDataToAirtableRecord(webhookData) {
   return record;
 }
 
-// Function to save record to Airtable
-async function saveToAirtable(record) {
+// Function to save record to a specific Airtable base and table with retry logic
+async function saveToAirtable(record, baseConfig, apiKey, attempt = 1) {
+  const MAX_ATTEMPTS = 5;
+  const BASE_DELAY_MS = 1000;
+  
   try {
+    const base = new Airtable({apiKey}).base(baseConfig.baseId);
+    const table = base(baseConfig.tableId);
+    
+    // Apply field mappings if specified
+    let mappedRecord = {...record};
+    if (baseConfig.fieldMappings) {
+      mappedRecord = Object.keys(record).reduce((mapped, key) => {
+        const mappedKey = baseConfig.fieldMappings[key] || key;
+        mapped[mappedKey] = record[key];
+        return mapped;
+      }, {});
+    }
+    
     // Save the record to Airtable
-    table.create(
-      [{ fields: record }],
-      function (err, records) {
-        if (err) {
-          throw err;
+    return new Promise((resolve, reject) => {
+      table.create(
+        [{ fields: mappedRecord }],
+        function (err, records) {
+          // Handle rate limiting (429) errors with exponential backoff
+          if (err && err.statusCode === 429 && attempt < MAX_ATTEMPTS) {
+            const delay = Math.min(BASE_DELAY_MS * Math.pow(2, attempt - 1), 30000); // Cap at 30 seconds
+            console.log(`Rate limit hit for base ${baseConfig.baseId}. Retrying in ${delay}ms (attempt ${attempt}/${MAX_ATTEMPTS})`);
+            
+            setTimeout(() => {
+              saveToAirtable(record, baseConfig, apiKey, attempt + 1)
+                .then(resolve)
+                .catch(reject);
+            }, delay);
+            return;
+          } else if (err) {
+            console.error(`Error saving to Airtable (attempt ${attempt}/${MAX_ATTEMPTS}):`, err);
+            reject(err);
+            return;
+          }
+          
+          records.forEach(function (record) {
+            console.log(`Record saved to Airtable base ${baseConfig.baseId}, table ${baseConfig.tableId}: ${record.getId()}`);
+          });
+          resolve(records);
         }
-        records.forEach(function (record) {
-          console.log('Record saved to Airtable:', record.getId());
-        });
-      }
-    )
+      );
+    });
   } catch (error) {
     console.error('Error saving to Airtable:', error);
+    throw error;
   }
 }
 
@@ -101,10 +159,10 @@ app.post('/', async (req, res) => {
   // hash the message string with your Webhook Secret Token and prepend the version semantic
   const signature = `v0=${hashForVerify}`;
 
-  // you validating the request came from Zoom https://marketplace.zoom.us/docs/api-reference/webhook-reference#notification-structure
+  // you validating the request came from Zoom
   if (req.headers['x-zm-signature'] === signature) {
 
-    // Zoom validating you control the webhook endpoint https://marketplace.zoom.us/docs/api-reference/webhook-reference#validate-webhook-endpoint
+    // Zoom validating you control the webhook endpoint
     if(req.body.event === 'endpoint.url_validation') {
       const hashForValidate = crypto.createHmac('sha256', process.env.ZOOM_WEBHOOK_SECRET_TOKEN).update(req.body.payload.plainToken).digest('hex');
 
@@ -146,14 +204,43 @@ app.post('/', async (req, res) => {
             req.body.event === 'meeting.participant_left') {
           try {
             const record = mapWebhookDataToAirtableRecord(req.body);
-            await saveToAirtable(record);
-            console.log(`Webhook data saved to Airtable for event: ${req.body.event}`);
+            const meetingTopic = req.body.payload.object.topic || '';
+            const config = loadConfig();
+            const targetBases = determineTargetBases(meetingTopic, config);
+            
+            if (targetBases.length === 0) {
+              console.log(`No matching bases found for topic: "${meetingTopic}"`);
+              
+              // Fallback to the environment variable settings if configured
+              if (process.env.AIRTABLE_API_KEY && process.env.AIRTABLE_BASE_ID && process.env.AIRTABLE_TABLE_ID) {
+                const fallbackBase = {
+                  baseId: process.env.AIRTABLE_BASE_ID,
+                  tableId: process.env.AIRTABLE_TABLE_ID
+                };
+                console.log('Using fallback Airtable configuration from environment variables');
+                await saveToAirtable(record, fallbackBase, process.env.AIRTABLE_API_KEY);
+              }
+            } else {
+              // Save to all matching bases with rate limiting protection
+              const apiKey = process.env.AIRTABLE_API_KEY;
+              
+              // Process bases sequentially to avoid overwhelming Airtable rate limits
+              // This is especially important if multiple conditions match the same base
+              for (const base of targetBases) {
+                try {
+                  await saveToAirtable(record, base, apiKey);
+                  console.log(`Webhook data saved to Airtable base ${base.baseId} for event: ${req.body.event}`);
+                } catch (error) {
+                  console.error(`Failed to save to Airtable base ${base.baseId} after multiple attempts:`, error);
+                }
+              }
+            }
           } catch (error) {
             console.error('Error saving webhook data to Airtable:', error);
           }
         }
       } catch (error) {
-        console.error('Error forwarding webhook:', error);
+        console.error('Error processing webhook:', error);
       }
     }
   } else {

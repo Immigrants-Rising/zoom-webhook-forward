@@ -1,4 +1,4 @@
 node_modules
 .env*
 tmp
-destinations.yaml
+config.yaml

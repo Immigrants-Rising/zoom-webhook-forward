@@ -14,23 +14,55 @@ const app = express();
 function loadConfig() {
   try {
     const configFile = process.env.CONFIG_FILE_PATH || './config.yaml';
+    console.log(`Loading configuration from: ${configFile}`);
     const fileContents = fs.readFileSync(configFile, 'utf8');
-    return yaml.load(fileContents);
+    const config = yaml.load(fileContents);
+    
+    // Safety checks
+    if (!config) {
+      console.error('Configuration file is empty or invalid');
+      return { bases: [], googlesheets: [] };
+    }
+    
+    if (!config.bases) config.bases = [];
+    if (!config.googlesheets) config.googlesheets = [];
+    
+    console.log(`Loaded ${config.bases.length} Airtable bases and ${config.googlesheets.length} Google Sheets configurations`);
+    return config;
   } catch (e) {
     console.error('Error loading configuration:', e);
-    return { bases: [] };
+    return { bases: [], googlesheets: [] };
   }
 }
 
 // Function to determine which destinations to use based on meeting topic
 function determineTargetBases(meetingTopic, config) {
   const matchingDestinations = [];
+  console.log(`Evaluating destinations for meeting topic: "${meetingTopic}"`);
   
   // Process Airtable bases
   if (config.bases) {
     for (const base of config.bases) {
-      // If the base has no condition, or if it meets the condition
-      if (!base.condition || meetingTopic.match(new RegExp(base.condition, 'i'))) {
+      let matches = false;
+      
+      // If the base has no condition, consider it a match
+      if (!base.condition) {
+        matches = true;
+        console.log(`Base ${base.baseId} matched (no condition)`);
+      } else {
+        // Try to match the condition
+        try {
+          const regex = new RegExp(base.condition, 'i');
+          matches = regex.test(meetingTopic);
+          console.log(`Base ${base.baseId} condition "${base.condition}" ${matches ? 'matched' : 'did not match'}`);
+        } catch (error) {
+          console.error(`Invalid regex in base ${base.baseId} condition: ${base.condition}`, error);
+          // Skip this base if the regex is invalid
+          continue;
+        }
+      }
+      
+      if (matches) {
         // Set default priority if not specified
         base.priority = base.priority || 100;
         matchingDestinations.push(base);
@@ -41,8 +73,26 @@ function determineTargetBases(meetingTopic, config) {
   // Process Google Sheets
   if (config.googlesheets) {
     for (const sheet of config.googlesheets) {
-      // If the sheet has no condition, or if it meets the condition
-      if (!sheet.condition || meetingTopic.match(new RegExp(sheet.condition, 'i'))) {
+      let matches = false;
+      
+      // If the sheet has no condition, consider it a match
+      if (!sheet.condition) {
+        matches = true;
+        console.log(`Sheet ${sheet.spreadsheetId}/${sheet.sheetName} matched (no condition)`);
+      } else {
+        // Try to match the condition
+        try {
+          const regex = new RegExp(sheet.condition, 'i');
+          matches = regex.test(meetingTopic);
+          console.log(`Sheet ${sheet.spreadsheetId}/${sheet.sheetName} condition "${sheet.condition}" ${matches ? 'matched' : 'did not match'}`);
+        } catch (error) {
+          console.error(`Invalid regex in sheet ${sheet.spreadsheetId}/${sheet.sheetName} condition: ${sheet.condition}`, error);
+          // Skip this sheet if the regex is invalid
+          continue;
+        }
+      }
+      
+      if (matches) {
         // Set default priority if not specified
         sheet.priority = sheet.priority || 100;
         // Add type identifier
@@ -53,7 +103,10 @@ function determineTargetBases(meetingTopic, config) {
   }
   
   // Sort destinations by priority (lower numbers first)
-  return matchingDestinations.sort((a, b) => (a.priority || 100) - (b.priority || 100));
+  const sortedDestinations = matchingDestinations.sort((a, b) => (a.priority || 100) - (b.priority || 100));
+  
+  console.log(`Found ${sortedDestinations.length} matching destinations`);
+  return sortedDestinations;
 }
 
 // Function to map webhook data to Airtable record
@@ -258,8 +311,9 @@ app.use(bodyParser.json());
 app.post('/', async (req, res) => {
   var response;
 
-  console.log(req.headers);
-  console.log(req.body);
+  console.log('Received webhook request');
+  console.log('Headers:', req.headers);
+  console.log('Body:', JSON.stringify(req.body).substring(0, 500) + '...');
 
   // construct the message string
   const message = `v0:${req.headers['x-zm-request-timestamp']}:${JSON.stringify(req.body)}`;
@@ -284,7 +338,7 @@ app.post('/', async (req, res) => {
         status: 200
       };
 
-      console.log(response.message);
+      console.log('Webhook validation response:', response.message);
 
       res.status(response.status);
       res.json(response.message);
@@ -307,7 +361,7 @@ app.post('/', async (req, res) => {
           console.log('Webhook forwarded successfully');
         }
         
-        // Save data to Airtable if it's a relevant event
+        // Save data to destinations if it's a relevant event
         if (req.body.event === 'webinar.participant_joined' || 
             req.body.event === 'webinar.participant_left' ||
             req.body.event === 'meeting.participant_joined' ||
@@ -315,11 +369,15 @@ app.post('/', async (req, res) => {
           try {
             const record = mapWebhookDataToAirtableRecord(req.body);
             const meetingTopic = req.body.payload.object.topic || '';
+            console.log(`Processing webhook for meeting topic: "${meetingTopic}"`);
+            
             const config = loadConfig();
+            console.log('Loaded configuration:', JSON.stringify(config, null, 2));
+            
             const targetBases = determineTargetBases(meetingTopic, config);
             
             if (targetBases.length === 0) {
-              console.log(`No matching bases found for topic: "${meetingTopic}"`);
+              console.log(`No matching destinations found for topic: "${meetingTopic}"`);
               
               // Fallback to the environment variable settings if configured
               if (process.env.AIRTABLE_API_KEY && process.env.AIRTABLE_BASE_ID && process.env.AIRTABLE_TABLE_ID) {
@@ -331,29 +389,35 @@ app.post('/', async (req, res) => {
                 await saveToAirtable(record, fallbackBase, process.env.AIRTABLE_API_KEY);
               }
             } else {
+              console.log(`Found ${targetBases.length} matching destinations to process`);
+              
               // Save to all matching destinations with rate limiting protection
               const apiKey = process.env.AIRTABLE_API_KEY;
               
               // Process destinations sequentially to avoid overwhelming rate limits
               for (const destination of targetBases) {
                 try {
+                  console.log(`Processing destination:`, JSON.stringify(destination));
+                  
                   if (destination.type === 'googlesheet') {
                     // Handle Google Sheet destination
                     await saveToGoogleSheet(record, destination);
-                    console.log(`Webhook data saved to Google Sheet ${destination.spreadsheetId} for event: ${req.body.event}`);
+                    console.log(`Webhook data saved to Google Sheet ${destination.spreadsheetId}/${destination.sheetName} for event: ${req.body.event}`);
                   } else {
                     // Default to Airtable destination
                     await saveToAirtable(record, destination, apiKey);
-                    console.log(`Webhook data saved to Airtable base ${destination.baseId} for event: ${req.body.event}`);
+                    console.log(`Webhook data saved to Airtable base ${destination.baseId}/${destination.tableId} for event: ${req.body.event}`);
                   }
                 } catch (error) {
-                  console.error(`Failed to save to destination ${JSON.stringify(destination)} after multiple attempts:`, error);
+                  console.error(`Failed to save to destination`, JSON.stringify(destination), `Error:`, error);
                 }
               }
             }
           } catch (error) {
-            console.error('Error saving webhook data to Airtable:', error);
+            console.error('Error processing webhook data:', error);
           }
+        } else {
+          console.log(`Skipping event type: ${req.body.event} (not a participant join/leave event)`);
         }
       } catch (error) {
         console.error('Error processing webhook:', error);

@@ -15,6 +15,7 @@
 
 node_modules
 #!include:.gitignore
+!config.yaml
 
 env.yaml
 

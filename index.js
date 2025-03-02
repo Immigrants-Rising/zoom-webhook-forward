@@ -6,6 +6,7 @@ const axios = require('axios');
 const Airtable = require('airtable');
 const yaml = require('js-yaml');
 const fs = require('fs');
+const {google} = require('googleapis');
 
 const app = express();
 
@@ -21,23 +22,38 @@ function loadConfig() {
   }
 }
 
-// Function to determine which base to use based on meeting topic
+// Function to determine which destinations to use based on meeting topic
 function determineTargetBases(meetingTopic, config) {
-  const matchingBases = [];
+  const matchingDestinations = [];
   
-  for (const base of config.bases) {
-    // If the base has no condition, or if it meets the condition
-    if (!base.condition || meetingTopic.match(new RegExp(base.condition, 'i'))) {
-      // Set default priority if not specified
-      if (base.priority === undefined) {
-        base.priority = 100;
+  // Process Airtable bases
+  if (config.bases) {
+    for (const base of config.bases) {
+      // If the base has no condition, or if it meets the condition
+      if (!base.condition || meetingTopic.match(new RegExp(base.condition, 'i'))) {
+        // Set default priority if not specified
+        base.priority = base.priority || 100;
+        matchingDestinations.push(base);
       }
-      matchingBases.push(base);
     }
   }
   
-  // Sort bases by priority (lower numbers first)
-  return matchingBases.sort((a, b) => (a.priority || 100) - (b.priority || 100));
+  // Process Google Sheets
+  if (config.googlesheets) {
+    for (const sheet of config.googlesheets) {
+      // If the sheet has no condition, or if it meets the condition
+      if (!sheet.condition || meetingTopic.match(new RegExp(sheet.condition, 'i'))) {
+        // Set default priority if not specified
+        sheet.priority = sheet.priority || 100;
+        // Add type identifier
+        sheet.type = 'googlesheet';
+        matchingDestinations.push(sheet);
+      }
+    }
+  }
+  
+  // Sort destinations by priority (lower numbers first)
+  return matchingDestinations.sort((a, b) => (a.priority || 100) - (b.priority || 100));
 }
 
 // Function to map webhook data to Airtable record
@@ -89,43 +105,63 @@ function mapWebhookDataToAirtableRecord(webhookData) {
   return record;
 }
 
-// Function to save record to a specific Airtable base and table with retry logic
-async function saveToAirtable(record, baseConfig, apiKey, attempt = 1) {
-  const MAX_ATTEMPTS = 5;
-  const BASE_DELAY_MS = 1000;
+// Helper function to apply field mappings to a record
+function applyFieldMappings(record, fieldMappings) {
+  if (!fieldMappings) return {...record};
   
-  try {
+  return Object.keys(record).reduce((mapped, key) => {
+    const mappedKey = fieldMappings[key] || key;
+    mapped[mappedKey] = record[key];
+    return mapped;
+  }, {});
+}
+
+// Generic retry function with exponential backoff
+async function withRetry(operation, name, maxAttempts = 5, baseDelayMs = 1000) {
+  let lastError;
+  
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      
+      // Check if it's a rate limiting error (429)
+      const isRateLimitError = error.statusCode === 429 || 
+                              (error.code === 429) || 
+                              (error.message && error.message.includes('quota'));
+      
+      if (isRateLimitError && attempt < maxAttempts) {
+        const delay = Math.min(baseDelayMs * Math.pow(2, attempt - 1), 30000); // Cap at 30 seconds
+        console.log(`Rate limit hit for ${name}. Retrying in ${delay}ms (attempt ${attempt}/${maxAttempts})`);
+        
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      
+      console.error(`Error in ${name} (attempt ${attempt}/${maxAttempts}):`, error);
+      throw error;
+    }
+  }
+  
+  throw lastError;
+}
+
+// Function to save record to a specific Airtable base and table with retry logic
+async function saveToAirtable(record, baseConfig, apiKey) {
+  return withRetry(async () => {
     const base = new Airtable({apiKey}).base(baseConfig.baseId);
     const table = base(baseConfig.tableId);
     
     // Apply field mappings if specified
-    let mappedRecord = {...record};
-    if (baseConfig.fieldMappings) {
-      mappedRecord = Object.keys(record).reduce((mapped, key) => {
-        const mappedKey = baseConfig.fieldMappings[key] || key;
-        mapped[mappedKey] = record[key];
-        return mapped;
-      }, {});
-    }
+    const mappedRecord = applyFieldMappings(record, baseConfig.fieldMappings);
     
     // Save the record to Airtable
     return new Promise((resolve, reject) => {
       table.create(
         [{ fields: mappedRecord }],
         function (err, records) {
-          // Handle rate limiting (429) errors with exponential backoff
-          if (err && err.statusCode === 429 && attempt < MAX_ATTEMPTS) {
-            const delay = Math.min(BASE_DELAY_MS * Math.pow(2, attempt - 1), 30000); // Cap at 30 seconds
-            console.log(`Rate limit hit for base ${baseConfig.baseId}. Retrying in ${delay}ms (attempt ${attempt}/${MAX_ATTEMPTS})`);
-            
-            setTimeout(() => {
-              saveToAirtable(record, baseConfig, apiKey, attempt + 1)
-                .then(resolve)
-                .catch(reject);
-            }, delay);
-            return;
-          } else if (err) {
-            console.error(`Error saving to Airtable (attempt ${attempt}/${MAX_ATTEMPTS}):`, err);
+          if (err) {
             reject(err);
             return;
           }
@@ -137,9 +173,83 @@ async function saveToAirtable(record, baseConfig, apiKey, attempt = 1) {
         }
       );
     });
-  } catch (error) {
-    console.error('Error saving to Airtable:', error);
-    throw error;
+  }, `Airtable base ${baseConfig.baseId}`);
+}
+
+// Function to save record to a specific Google Sheet
+async function saveToGoogleSheet(record, sheetConfig) {
+  return withRetry(async () => {
+    // Authenticate with Google Sheets API
+    const auth = await getGoogleAuth();
+    const sheets = google.sheets({ version: 'v4', auth });
+    
+    // Apply field mappings if specified
+    const mappedRecord = applyFieldMappings(record, sheetConfig.fieldMappings);
+    
+    // First, get the column headers from the sheet to ensure proper ordering
+    const headerResponse = await sheets.spreadsheets.values.get({
+      spreadsheetId: sheetConfig.spreadsheetId,
+      range: `${sheetConfig.sheetName}!1:1`,
+    });
+    
+    const headers = headerResponse.data.values[0];
+    
+    // Create an ordered row based on the headers
+    const rowData = headers.map(header => mappedRecord[header] || '');
+    
+    // Now find the last row with data to append after it
+    const dataResponse = await sheets.spreadsheets.values.get({
+      spreadsheetId: sheetConfig.spreadsheetId,
+      range: sheetConfig.sheetName,
+    });
+    
+    const lastRow = dataResponse.data.values ? dataResponse.data.values.length + 1 : 2;
+    const range = `${sheetConfig.sheetName}!A${lastRow}`;
+    
+    // Append the new row
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: sheetConfig.spreadsheetId,
+      range: range,
+      valueInputOption: 'RAW',
+      resource: {
+        values: [rowData],
+      },
+    });
+    
+    console.log(`Record saved to Google Sheet ${sheetConfig.spreadsheetId}, sheet ${sheetConfig.sheetName} at row ${lastRow}`);
+    return { sheet: sheetConfig.sheetName, row: lastRow };
+  }, `Google Sheet ${sheetConfig.spreadsheetId}`);
+}
+
+// Helper function to get Google Auth client
+async function getGoogleAuth() {
+  // There are multiple ways to authenticate with Google APIs
+  // This example uses service account credentials from environment
+  
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    // If using a credentials file path
+    return new google.auth.GoogleAuth({
+      scopes: ['https://www.googleapis.com/auth/spreadsheets']
+    });
+  } else if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
+    // If credentials are provided as a JSON string in environment
+    const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+    const client = new google.auth.JWT(
+      credentials.client_email,
+      null,
+      credentials.private_key,
+      ['https://www.googleapis.com/auth/spreadsheets']
+    );
+    await client.authorize();
+    return client;
+  } else if (process.env.FUNCTION_IDENTITY) {
+    // If running on Google Cloud with proper IAM permissions (recommended approach)
+    // This uses the default service account of the Cloud Function
+    return new google.auth.GoogleAuth({
+      scopes: ['https://www.googleapis.com/auth/spreadsheets']
+    });
+  } else {
+    throw new Error('No Google authentication method available. Please set up credentials.');
   }
 }
 
@@ -221,17 +331,23 @@ app.post('/', async (req, res) => {
                 await saveToAirtable(record, fallbackBase, process.env.AIRTABLE_API_KEY);
               }
             } else {
-              // Save to all matching bases with rate limiting protection
+              // Save to all matching destinations with rate limiting protection
               const apiKey = process.env.AIRTABLE_API_KEY;
               
-              // Process bases sequentially to avoid overwhelming Airtable rate limits
-              // This is especially important if multiple conditions match the same base
-              for (const base of targetBases) {
+              // Process destinations sequentially to avoid overwhelming rate limits
+              for (const destination of targetBases) {
                 try {
-                  await saveToAirtable(record, base, apiKey);
-                  console.log(`Webhook data saved to Airtable base ${base.baseId} for event: ${req.body.event}`);
+                  if (destination.type === 'googlesheet') {
+                    // Handle Google Sheet destination
+                    await saveToGoogleSheet(record, destination);
+                    console.log(`Webhook data saved to Google Sheet ${destination.spreadsheetId} for event: ${req.body.event}`);
+                  } else {
+                    // Default to Airtable destination
+                    await saveToAirtable(record, destination, apiKey);
+                    console.log(`Webhook data saved to Airtable base ${destination.baseId} for event: ${req.body.event}`);
+                  }
                 } catch (error) {
-                  console.error(`Failed to save to Airtable base ${base.baseId} after multiple attempts:`, error);
+                  console.error(`Failed to save to destination ${JSON.stringify(destination)} after multiple attempts:`, error);
                 }
               }
             }

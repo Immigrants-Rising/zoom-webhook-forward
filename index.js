@@ -245,27 +245,23 @@ async function saveToGoogleSheet(record, sheetConfig) {
     // Create an ordered row based on the headers
     const rowData = headers.map(header => mappedRecord[header] || '');
     
-    // Now find the last row with data to append after it
-    const dataResponse = await sheetsApiClient.spreadsheets.values.get({
+    // Instead of querying the entire sheet, use the append method
+    // This is much faster as it automatically appends to the end of data
+    const appendResponse = await sheetsApiClient.spreadsheets.values.append({
       spreadsheetId: sheetConfig.spreadsheetId,
-      range: sheetConfig.sheetName,
-    });
-    
-    const lastRow = dataResponse.data.values ? dataResponse.data.values.length + 1 : 2;
-    const range = `${sheetConfig.sheetName}!A${lastRow}`;
-    
-    // Append the new row
-    await sheetsApiClient.spreadsheets.values.update({
-      spreadsheetId: sheetConfig.spreadsheetId,
-      range: range,
+      range: `${sheetConfig.sheetName}!A1`,
       valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
       resource: {
         values: [rowData],
       },
     });
     
-    console.log(`Record saved to Google Sheet ${sheetConfig.spreadsheetId}, sheet ${sheetConfig.sheetName} at row ${lastRow}`);
-    return { sheet: sheetConfig.sheetName, row: lastRow };
+    // Extract information about where the data was appended
+    const updatedRange = appendResponse.data.updates.updatedRange;
+    console.log(`Record appended to Google Sheet ${sheetConfig.spreadsheetId}, sheet ${sheetConfig.sheetName}, range: ${updatedRange}`);
+    
+    return { sheet: sheetConfig.sheetName, range: updatedRange };
   }, `Google Sheet ${sheetConfig.spreadsheetId}`);
 }
 
@@ -548,7 +544,7 @@ async function processWebhook(body, headers) {
       } catch (error) {
         console.error(`Failed to save to destination`, JSON.stringify(destination), `Error:`, error);
       }
-    }, 3); // Process up to 3 destinations at once
+    }, 8); // Process up to 8 destinations at once
     
   } catch (error) {
     console.error('Error processing webhook data:', error);

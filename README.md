@@ -1,166 +1,182 @@
-# About this fork
+# Zoom Webhook Handler
 
-This fork makes it so that when you catch the webhook, you can forward it to an arbitrary endpoint. Additionally, you can deploy this as a Google Cloud Function using the functions-framework.
+A highly optimized Google Cloud Function for processing Zoom meeting and webinar webhooks and routing the data to multiple Airtable bases and Google Sheets. You can also forward to an arbitrary endpoint.
 
-# Zoom Webhook sample
+This is originally forked from [this repository](https://github.com/zoom/webhook-sample).
 
-Use of this sample app is subject to our [Terms of Use](https://explore.zoom.us/en/legal/zoom-api-license-and-tou/).
+## Overview
 
----
+This project provides a serverless solution for capturing Zoom webhook events (like participant joins/leaves) and automatically saving the data to configured destinations based on meeting topics. It features intelligent routing, performance optimizations, and comprehensive error handling.
 
-**NOTE:** This Sample App has been updated to use the [Webhook Secret Token](https://developers.zoom.us/docs/api/rest/webhook-reference/#verify-webhook-events) instead of the [Webhook Verification Token](https://developers.zoom.us/docs/api/rest/webhook-reference/#verify-webhook-events) to validate requests are sent from Zoom.
+## Features
 
----
+- **Multi-destination Support**: Route data to multiple Airtable bases and Google Sheets
+- **Conditional Routing**: Use regex patterns to route data based on meeting topics
+- **Performance Optimized**: Header prefetching, caching, and controlled concurrency
+- **Rate Limit Handling**: Automatic retries with exponential backoff
+- **YAML Configuration**: Easy-to-maintain configuration file
+- **Field Mapping**: Custom field mappings for each destination
+- **Detailed Logging**: Granular timing and performance metrics
+- **Data Backfill**: Utility for recovering from outages
+- **Status Monitoring**: Endpoint for checking system health
 
-This is a Node.js / Express server that receives [Zoom Platform Webhooks](https://developers.zoom.us/docs/api/rest/webhook-reference/#enable-webhooks) and [Zoom Video SDK Webhooks](https://developers.zoom.us/docs/api/rest/webhook-reference/#enable-webhooks).
+## Components
 
-If you would like to skip these steps and just deploy the finished code to Heroku, click the Deploy to Heroku button. (You will still need to configure a few simple things, so skip to [Deployment](#deployment).)
+### 1. Webhook Handler (Cloud Function)
 
-[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/zoom/webhook-sample)
+The main component that receives webhooks from Zoom and routes them to appropriate destinations.
 
-## Installation
+### 2. Configuration (YAML)
 
-In terminal, run the following command to clone the repo:
+Defines routing rules, destinations, and field mappings.
 
-`$ git clone https://github.com/zoom/webhook-sample.git`
+### 3. Backfill Utility
 
-## Setup
+A standalone script for reprocessing webhook data from a JSON file.
 
-1. In terminal, cd into the cloned repo:
+## Setup & Deployment
 
-   `$ cd webhook-sample`
+### Prerequisites
 
-1. Then install the dependencies:
+- Google Cloud account with Cloud Functions enabled
+- Airtable account and API key
+- Google service account with Sheets API access
+- Zoom developer account with webhook configuration
 
-   `$ npm install`
+### Environment Variables
 
-1. Create an environment file to store your Webhook Secret Token:
+```
+# Required
+AIRTABLE_API_KEY=your_airtable_api_key
+ZOOM_WEBHOOK_SECRET_TOKEN=your_zoom_webhook_secret
 
-   `$ touch .env`
+# Optional
+FORWARD_WEBHOOK_URL=https://another-endpoint.com/webhook
+CONFIG_FILE_PATH=./config.yaml
+FUNCTION_IDENTITY=true  # For using default identity
 
-1. Add the following code to the .env file, and insert your [Zoom Webhook Secret Token](https://developers.zoom.us/docs/api/rest/webhook-reference/#verify-webhook-events):
+# For Google Sheets (choose one)
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/credentials.json
+GOOGLE_SERVICE_ACCOUNT_KEY={"type":"service_account",...}
+```
 
-   ```
-   ZOOM_WEBHOOK_SECRET_TOKEN=ZOOM_WEBHOOK_SECRET_TOKEN_HERE
-   LOG_LEVEL=info
-   ```
-   
-   The LOG_LEVEL can be set to one of the following values:
-   - `error`: Only show critical errors
-   - `warn`: Show warnings and errors
-   - `info`: Show general informational messages (default)
-   - `timing`: Show performance timing information
-   - `debug`: Show detailed debugging information
-   - `silly`: Show the most verbose output
+### Configuration File (config.yaml)
 
-   ![Zoom Webhook Secret Token](https://developers.zoom.us/img/nextImageExportOptimizer/webhook-secret-token-opt-640.WEBP "Zoom Webhook Secret Token")
+```yaml
+bases:
+  # Airtable destinations
+  - baseId: appXXXXXXXXXXXXXX
+    tableId: tblXXXXXXXXXXXXXX
+    condition: "\\[HE\\]"
+    priority: 10
+    fieldMappings:
+      "Meeting Topic": "Session Name"
 
-   > The Webhook Secret Token allows you to [verify webhook requests come from Zoom](https://developers.zoom.us/docs/api/rest/webhook-reference/#verify-webhook-events) and for Zoom to [validate that you control your webhook endpoint](https://developers.zoom.us/docs/api/rest/webhook-reference/#validate-your-webhook-endpoint).
+googlesheets:
+  # Google Sheets destinations
+  - spreadsheetId: "1XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+    sheetName: "Zoom Attendance"
+    condition: "\\[HE\\]"
+    priority: 20
+    fieldMappings:
+      "Participant Name": "user_name"
+```
 
-1. Save and close .env.
+### Deployment
 
-1. Start the server:
+```bash
+# Install dependencies
+npm install
 
-   `$ npm run start`
-
-1. We need to expose the local server to the internet to accept post requests, we will use [Ngrok](https://ngrok.com) (free) for this.
-
-   Once installed, open a new terminal tab and run:
-
-   `$ ngrok http 4000`
-
-   > NOTE: [I've put ngrok in my PATH so I can call it globally.](https://stackoverflow.com/a/36759493/6592510)
-
-1. Copy the ngrok https url and paste it in the Bot endpoint URL input on your Zoom App's Features section. Remember to include `/webhook` path.
-
-   Example: `https://abc123.ngrok.io/webhook`
-
-1. Click "Validate".
-
-   ![Zoom Webhook Configuration](https://developers.zoom.us/img/nextImageExportOptimizer/webhook-validate-opt-640.WEBP "Zoom Webhook Configuration")
-
-1. Choose the events you'd like to subscribe to.
-
-1. Click "Save".
-
-   ![Zoom Webhooks Configured](https://developers.zoom.us/img/nextImageExportOptimizer/webhook-validate-success-opt-640.WEBP "Zoom Webhooks Configured")
+# Deploy to Google Cloud Functions
+gcloud functions deploy zoomWebhook \
+  --runtime nodejs18 \
+  --trigger-http \
+  --allow-unauthenticated \
+  --entry-point zoomWebhook \
+  --set-env-vars AIRTABLE_API_KEY=your_key,ZOOM_WEBHOOK_SECRET_TOKEN=your_token
+```
 
 ## Usage
 
-1. Trigger the respective Webhook.
+### Zoom Webhook Setup
 
-   For example, if you chose the [Start Meeting Webhook](https://developers.zoom.us/docs/api/rest/reference/zoom-api/events/#operation/meeting.started), start a Zoom Meeting. You will see the Webhook headers and payload logged in terminal.
+1. Create a Zoom App in the Zoom Marketplace
+2. Configure Feature → Event Subscriptions
+3. Add the deployed function URL as the endpoint
+4. Subscribe to these events:
+   - `meeting.participant_joined`
+   - `meeting.participant_left`
+   - `webinar.participant_joined`
+   - `webinar.participant_left`
 
-   ```json
-   {
-     "host": "abc123.ngrok.io",
-     "user-agent": "Zoom Marketplace/1.0a",
-     "content-length": "335",
-     "authorization": "{LEGACY_WEBHOOK_VERIFICATION_TOKEN}",
-     "clientid": "{CLIENT_ID}",
-     "content-type": "application/json; charset=utf-8",
-     "x-forwarded-for": "{X_FORWARDED_FOR}",
-     "x-forwarded-proto": "https",
-     "x-zm-request-timestamp": "X_ZM_REQUEST_TIMESTAMP",
-     "x-zm-signature": "v0={HASHED_WEBHOOK_SECRET_TOKEN}",
-     "x-zm-trackingid": "{X_ZM_TRACKINGID}",
-     "accept-encoding": "gzip"
-   }
-   ```
+### Google Sheets Permissions
 
-   ```json
-   {
-     "event": "meeting.started",
-     "payload": {
-       "account_id": "{ACCOUNT_ID}",
-       "object": {
-         "duration": 0,
-         "start_time": "2021-11-02T20:43:19Z",
-         "timezone": "America/Denver",
-         "topic": "{TOPIC}",
-         "id": "{MEETING_ID}",
-         "type": 4,
-         "uuid": "{MEETING_UUID}",
-         "host_id": "{HOST_ID}"
-       }
-     },
-     "event_ts": 1635885799302
-   }
-   ```
+For each Google Sheet in your configuration:
+1. Open the sheet in Google Sheets
+2. Click "Share"
+3. Add the service account email with Editor permissions
 
-## Deployment
+## Data Backfill
 
-### Heroku (button)
+If your function experiences downtime, you can use the backfill utility to reprocess missed events.
 
-1. After clicking the "Deploy to Heroku" button, enter a name for your app (or leave it blank to have a name generated for you), and insert your [Zoom Webhook Secret Token](https://developers.zoom.us/docs/api/rest/webhook-reference/#verify-webhook-events):
+## Performance Considerations
 
-   - `ZOOM_WEBHOOK_SECRET_TOKEN` (Your Zoom Webhook Secret Token, found on your App's Features page)
-   - `LOG_LEVEL` (Optional: Set the logging level - default is 'info')
+- **Cold Starts**: The function performs initialization at cold start to minimize per-request overhead
+- **Concurrency**: Default concurrency limit is 3 destinations at once
+- **Rate Limits**: Airtable has a 5 QPS limit per base
+- **Headers Prefetching**: Google Sheets headers are prefetched during initialization
+- **Response Time**: The function responds to Zoom immediately and processes asynchronously
 
-1. Then click "Deploy App".
+## Troubleshooting
 
-1. Copy the Heroku url and paste it in the Event notification endpoint URL input on your Zoom App's Features section. Remember to include `/webhook` path.
+### Common Issues
 
-   Example: `https://abc123.herokuapp.com/webhook`
+1. **Unauthorized requests from Zoom**:
+   - Verify the `ZOOM_WEBHOOK_SECRET_TOKEN` matches your Zoom app configuration
 
-### Heroku (CLI)
+2. **Missing Google Sheets data**:
+   - Ensure the service account has edit access to the spreadsheet
+   - Check header mapping in configuration matches actual sheet headers
 
-1. If you cloned this repo, you may use the [Heroku CLI](https://devcenter.heroku.com/articles/heroku-cli) to deploy your server. Remember to [set your config vars (envoirnment variables)](https://devcenter.heroku.com/articles/config-vars).
+3. **Rate limiting errors**:
+   - Reduce concurrency or add more delays between operations
+   - Check for other processes accessing the same Airtable bases
 
-1. Copy the Heroku url and paste it in the Event notification endpoint URL input on your Zoom App's Features section. Remember to include `/webhook` path.
+4. **Slow performance**:
+   - Inspect timing logs to identify bottlenecks
+   - Consider splitting high-traffic destinations
 
-   Example: `https://abc123.herokuapp.com/webhook`
+### Checking Logs
 
-### Other Server Hosting
+```bash
+gcloud functions logs read zoomWebhook --limit 100
+```
 
-1. For Other Server Hosting information, see [this tutorial](https://developer.mozilla.org/en-US/docs/Learn/Server-side/Express_Nodejs/deployment#choosing_a_hosting_provider).
+Look for `[TIMING]` entries to identify performance bottlenecks.
 
-1. Copy the deployed url and paste it in the Event notification endpoint URL input on your Zoom App's Features section. Remember to include `/webhook` path.
+## Advanced Configuration
 
-   Example: `https://abc123.compute-1.amazonaws.com/webhook`
+### Custom Field Mappings
 
-Now you are ready to [receive Zoom webhooks](#usage).
+Each destination can have custom field mappings to transform field names:
 
-## Need help?
+```yaml
+fieldMappings:
+  "Meeting Topic": "Session Name"
+  "Participant Name": "Attendee Name"
+  "Email": "Contact Email"
+```
 
-If you're looking for help, try [Developer Support](https://devsupport.zoom.us)   or our [Developer Forum](https://devforum.zoom.us). Priority support is also available with [Premier Developer Support](https://explore.zoom.us/docs/en-us/developer-support-plans.html) plans.
+### Destination Priority
+
+Lower priority numbers are processed first:
+
+```yaml
+- baseId: appXXXXXXXXXXXXXX
+  priority: 10  # Processed first
+
+- spreadsheetId: "1XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+  priority: 20  # Processed second
+```

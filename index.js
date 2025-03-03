@@ -1,4 +1,41 @@
-const functions = require('@google-cloud/functions-framework');
+// Function to determine if initialization is complete
+function isInitializationComplete() {
+  // Check if we have an auth client for Google Sheets
+  const hasGoogleAuth = !!googleAuthClient;
+  
+  // Check if config is cached
+  const hasConfig = !!configCache;
+  
+  // If we have sheets configured, check if headers are prefetched
+  let headersReady = true;
+  if (configCache && configCache.googlesheets) {
+    const totalSheets = configCache.googlesheets.length;
+    const cachedSheets = sheetsHeadersCache.size;
+    
+    if (totalSheets > 0 && cachedSheets < totalSheets) {
+      headersReady = false;
+    }
+  }
+  
+  return hasConfig && (
+    // Either we have no Google Sheets or we have auth and headers
+    !configCache?.googlesheets?.length || 
+    (hasGoogleAuth && headersReady)
+  );
+}
+
+// Get initialization status message
+function getInitializationStatus() {
+  const status = {
+    configLoaded: !!configCache,
+    googleAuthInitialized: !!googleAuthClient,
+    totalSheets: configCache?.googlesheets?.length || 0,
+    sheetHeadersPrefetched: sheetsHeadersCache.size,
+    isComplete: isInitializationComplete()
+  };
+  
+  return status;
+}const functions = require('@google-cloud/functions-framework');
 const express = require('express');
 const bodyParser = require('body-parser');
 const crypto = require('crypto');
@@ -14,20 +51,67 @@ let googleAuthClient = null;
 let sheetsApiClient = null;
 const regexCache = new Map();
 const airtableBaseCache = new Map();
+const sheetsHeadersCache = new Map();  // Cache for sheet headers
 
 // Initialize function - called once on cold start
-function initialize() {
+async function initialize() {
   console.log('Initializing webhook handler...');
+  const initStart = Date.now();
   
-  // Pre-load configuration
-  loadConfig();
-  
-  // Pre-initialize Google auth
-  initGoogleAuth().catch(err => {
-    console.error('Failed to initialize Google auth:', err);
-  });
-  
-  console.log('Initialization complete');
+  try {
+    // Pre-load configuration
+    const config = loadConfig();
+    
+    // Pre-initialize Google auth
+    if (config.googlesheets && config.googlesheets.length > 0) {
+      await initGoogleAuth();
+      
+      // Prefetch all Google Sheets headers
+      if (sheetsApiClient) {
+        console.log(`Prefetching headers for ${config.googlesheets.length} Google Sheets...`);
+        const prefetchStart = Date.now();
+        
+        // Use Promise.all to prefetch headers in parallel
+        await Promise.all(
+          config.googlesheets.map(async (sheet) => {
+            try {
+              const headersCacheKey = `${sheet.spreadsheetId}_${sheet.sheetName}`;
+              
+              // Skip if already cached
+              if (sheetsHeadersCache.has(headersCacheKey)) {
+                return;
+              }
+              
+              console.log(`Prefetching headers for sheet: ${sheet.sheetName}`);
+              const sheetStart = Date.now();
+              
+              const headerResponse = await sheetsApiClient.spreadsheets.values.get({
+                spreadsheetId: sheet.spreadsheetId,
+                range: `${sheet.sheetName}!1:1`,
+              });
+              
+              if (headerResponse.data.values && headerResponse.data.values[0]) {
+                sheetsHeadersCache.set(headersCacheKey, headerResponse.data.values[0]);
+                console.log(`Prefetched headers for ${sheet.sheetName} in ${Date.now() - sheetStart}ms`);
+              } else {
+                console.error(`Failed to prefetch headers for ${sheet.sheetName}: No data returned`);
+              }
+            } catch (error) {
+              console.error(`Error prefetching headers for sheet ${sheet.spreadsheetId}/${sheet.sheetName}:`, error);
+              // We'll continue with other sheets and handle this one at runtime if needed
+            }
+          })
+        );
+        
+        console.log(`Completed prefetching headers in ${Date.now() - prefetchStart}ms`);
+      }
+    }
+    
+    console.log(`Initialization completed in ${Date.now() - initStart}ms`);
+  } catch (error) {
+    console.error('Error during initialization:', error);
+    console.log('Continuing with partial initialization');
+  }
 }
 
 // Load and cache configuration from YAML file
@@ -254,21 +338,27 @@ async function saveToGoogleSheet(record, sheetConfig) {
       // Apply field mappings if specified
       const mappedRecord = applyFieldMappings(record, sheetConfig.fieldMappings);
       
-      // Use caching to optimize header fetching
-      const headersCacheKey = `headers_${sheetConfig.spreadsheetId}_${sheetConfig.sheetName}`;
-      let headers = regexCache.get(headersCacheKey);
+      // Get headers from cache
+      const headersCacheKey = `${sheetConfig.spreadsheetId}_${sheetConfig.sheetName}`;
+      let headers = sheetsHeadersCache.get(headersCacheKey);
       
+      // If not in cache, fetch them now
       if (!headers) {
         const headersStart = Date.now();
+        console.log(`[TIMING] Headers not prefetched for ${sheetConfig.sheetName}, fetching now`);
         
-        // First, get the column headers from the sheet to ensure proper ordering
+        // Get the column headers from the sheet
         const headerResponse = await sheetsApiClient.spreadsheets.values.get({
           spreadsheetId: sheetConfig.spreadsheetId,
           range: `${sheetConfig.sheetName}!1:1`,
         });
         
+        if (!headerResponse.data.values || !headerResponse.data.values[0]) {
+          throw new Error(`No headers found in sheet ${sheetConfig.sheetName}`);
+        }
+        
         headers = headerResponse.data.values[0];
-        regexCache.set(headersCacheKey, headers);
+        sheetsHeadersCache.set(headersCacheKey, headers);
         console.log(`[TIMING] Headers fetch for ${sheetConfig.sheetName}: ${Date.now() - headersStart}ms`);
       }
       
@@ -278,8 +368,7 @@ async function saveToGoogleSheet(record, sheetConfig) {
       // Append the data
       const appendStart = Date.now();
       
-      // Instead of querying the entire sheet, use the append method
-      // This is much faster as it automatically appends to the end of data
+      // Use the append method for better performance
       const appendResponse = await sheetsApiClient.spreadsheets.values.append({
         spreadsheetId: sheetConfig.spreadsheetId,
         range: `${sheetConfig.sheetName}!A1`,
@@ -300,11 +389,9 @@ async function saveToGoogleSheet(record, sheetConfig) {
     }, `GoogleSheet ${sheetConfig.spreadsheetId}/${sheetConfig.sheetName}`);
     
     const duration = Date.now() - startTime;
-    // Console log removed - we'll only log timing at the destination level
     return result;
   } catch (error) {
     const duration = Date.now() - startTime;
-    // Error logging remains at this level for debugging
     console.error(`[TIMING] Internal Google Sheets error for ${sheetConfig.spreadsheetId}/${sheetConfig.sheetName} after ${duration}ms:`, error);
     throw error;
   }
@@ -454,8 +541,14 @@ function determineTargetBases(meetingTopic, config) {
 const app = express();
 app.use(bodyParser.json());
 
-// Run initialization on module load
-initialize();
+// Run initialization asynchronously on module load
+(async function() {
+  try {
+    await initialize();
+  } catch (error) {
+    console.error('Error during async initialization:', error);
+  }
+})();
 
 app.post('/', async (req, res) => {
   const startTime = Date.now();
@@ -463,6 +556,12 @@ app.post('/', async (req, res) => {
 
   try {
     console.log(`[TIMING] Webhook request received at ${new Date().toISOString()}`);
+    
+    // Check initialization status
+    const initStatus = getInitializationStatus();
+    if (!initStatus.isComplete) {
+      console.log(`[TIMING] Processing webhook while initialization still in progress:`, initStatus);
+    }
     
     // Verify Zoom webhook signature
     const verifyStart = Date.now();

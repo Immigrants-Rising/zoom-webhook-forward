@@ -8,6 +8,14 @@ const yaml = require('js-yaml');
 const fs = require('fs');
 const { google } = require('googleapis');
 
+// Global variables to cache expensive operations
+let configCache = null;
+let googleAuthClient = null;
+let sheetsApiClient = null;
+const regexCache = new Map();
+const airtableBaseCache = new Map();
+const sheetsHeadersCache = new Map();  // Cache for sheet headers
+
 // Function to determine if initialization is complete
 function isInitializationComplete() {
   // Check if we have an auth client for Google Sheets
@@ -46,14 +54,6 @@ function getInitializationStatus() {
 
   return status;
 }
-
-// Global variables to cache expensive operations
-let configCache = null;
-let googleAuthClient = null;
-let sheetsApiClient = null;
-const regexCache = new Map();
-const airtableBaseCache = new Map();
-const sheetsHeadersCache = new Map();  // Cache for sheet headers
 
 // Initialize function - called once on cold start
 async function initialize() {

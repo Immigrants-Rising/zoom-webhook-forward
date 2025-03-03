@@ -159,10 +159,19 @@ function applyFieldMappings(record, fieldMappings) {
 // Generic retry function with exponential backoff
 async function withRetry(operation, name, maxAttempts = 5, baseDelayMs = 1000) {
   let lastError;
+  const startTime = Date.now();
   
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return await operation();
+      const opStart = Date.now();
+      const result = await operation();
+      
+      if (attempt > 1) {
+        // Only log timing for retry successes (attempts after the first)
+        console.log(`[TIMING] Operation '${name}' succeeded on attempt ${attempt} after ${Date.now() - opStart}ms (total time with retries: ${Date.now() - startTime}ms)`);
+      }
+      
+      return result;
     } catch (error) {
       lastError = error;
       
@@ -173,13 +182,13 @@ async function withRetry(operation, name, maxAttempts = 5, baseDelayMs = 1000) {
       
       if (isRateLimitError && attempt < maxAttempts) {
         const delay = Math.min(baseDelayMs * Math.pow(2, attempt - 1), 30000); // Cap at 30 seconds
-        console.log(`Rate limit hit for ${name}. Retrying in ${delay}ms (attempt ${attempt}/${maxAttempts})`);
+        console.log(`[TIMING] Rate limit hit for '${name}' after ${Date.now() - opStart}ms. Retrying in ${delay}ms (attempt ${attempt}/${maxAttempts})`);
         
         await new Promise(resolve => setTimeout(resolve, delay));
         continue;
       }
       
-      console.error(`Error in ${name} (attempt ${attempt}/${maxAttempts}):`, error);
+      console.error(`[TIMING] Error in '${name}' (attempt ${attempt}/${maxAttempts}) after ${Date.now() - opStart}ms:`, error);
       throw error;
     }
   }
@@ -189,80 +198,116 @@ async function withRetry(operation, name, maxAttempts = 5, baseDelayMs = 1000) {
 
 // Function to save record to a specific Airtable base and table with retry logic
 async function saveToAirtable(record, baseConfig, apiKey) {
-  return withRetry(async () => {
-    const base = getAirtableBase(apiKey, baseConfig.baseId);
-    const table = base(baseConfig.tableId);
-    
-    // Apply field mappings if specified
-    const mappedRecord = applyFieldMappings(record, baseConfig.fieldMappings);
-    
-    // Save the record to Airtable
-    return new Promise((resolve, reject) => {
-      table.create(
-        [{ fields: mappedRecord }],
-        function (err, records) {
-          if (err) {
-            reject(err);
-            return;
+  const startTime = Date.now();
+  
+  try {
+    const result = await withRetry(async () => {
+      const base = getAirtableBase(apiKey, baseConfig.baseId);
+      const table = base(baseConfig.tableId);
+      
+      // Apply field mappings if specified
+      const mappedRecord = applyFieldMappings(record, baseConfig.fieldMappings);
+      
+      // Save the record to Airtable
+      return new Promise((resolve, reject) => {
+        table.create(
+          [{ fields: mappedRecord }],
+          function (err, records) {
+            if (err) {
+              reject(err);
+              return;
+            }
+            
+            records.forEach(function (record) {
+              console.log(`Record saved to Airtable base ${baseConfig.baseId}, table ${baseConfig.tableId}: ${record.getId()}`);
+            });
+            resolve(records);
           }
-          
-          records.forEach(function (record) {
-            console.log(`Record saved to Airtable base ${baseConfig.baseId}, table ${baseConfig.tableId}: ${record.getId()}`);
-          });
-          resolve(records);
-        }
-      );
-    });
-  }, `Airtable base ${baseConfig.baseId}`);
+        );
+      });
+    }, `Airtable ${baseConfig.baseId}/${baseConfig.tableId}`);
+    
+    const duration = Date.now() - startTime;
+    // Console log removed - we'll only log timing at the destination level
+    return result;
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    // Error logging remains at this level for debugging
+    console.error(`[TIMING] Internal Airtable error for ${baseConfig.baseId}/${baseConfig.tableId} after ${duration}ms:`, error);
+    throw error;
+  }
 }
 
 // Function to save record to a specific Google Sheet
 async function saveToGoogleSheet(record, sheetConfig) {
-  // Ensure Google auth is initialized
-  if (!sheetsApiClient) {
-    await initGoogleAuth();
-  }
+  const startTime = Date.now();
   
-  return withRetry(async () => {
-    // Apply field mappings if specified
-    const mappedRecord = applyFieldMappings(record, sheetConfig.fieldMappings);
-    
-    // Use caching to optimize header fetching
-    const headersCacheKey = `headers_${sheetConfig.spreadsheetId}_${sheetConfig.sheetName}`;
-    let headers = regexCache.get(headersCacheKey);
-    
-    if (!headers) {
-      // First, get the column headers from the sheet to ensure proper ordering
-      const headerResponse = await sheetsApiClient.spreadsheets.values.get({
-        spreadsheetId: sheetConfig.spreadsheetId,
-        range: `${sheetConfig.sheetName}!1:1`,
-      });
-      
-      headers = headerResponse.data.values[0];
-      regexCache.set(headersCacheKey, headers);
+  try {
+    // Ensure Google auth is initialized
+    if (!sheetsApiClient) {
+      const authStart = Date.now();
+      await initGoogleAuth();
+      console.log(`[TIMING] Google auth initialization took ${Date.now() - authStart}ms`);
     }
     
-    // Create an ordered row based on the headers
-    const rowData = headers.map(header => mappedRecord[header] || '');
+    const result = await withRetry(async () => {
+      // Apply field mappings if specified
+      const mappedRecord = applyFieldMappings(record, sheetConfig.fieldMappings);
+      
+      // Use caching to optimize header fetching
+      const headersCacheKey = `headers_${sheetConfig.spreadsheetId}_${sheetConfig.sheetName}`;
+      let headers = regexCache.get(headersCacheKey);
+      
+      if (!headers) {
+        const headersStart = Date.now();
+        
+        // First, get the column headers from the sheet to ensure proper ordering
+        const headerResponse = await sheetsApiClient.spreadsheets.values.get({
+          spreadsheetId: sheetConfig.spreadsheetId,
+          range: `${sheetConfig.sheetName}!1:1`,
+        });
+        
+        headers = headerResponse.data.values[0];
+        regexCache.set(headersCacheKey, headers);
+        console.log(`[TIMING] Headers fetch for ${sheetConfig.sheetName}: ${Date.now() - headersStart}ms`);
+      }
+      
+      // Create an ordered row based on the headers
+      const rowData = headers.map(header => mappedRecord[header] || '');
+      
+      // Append the data
+      const appendStart = Date.now();
+      
+      // Instead of querying the entire sheet, use the append method
+      // This is much faster as it automatically appends to the end of data
+      const appendResponse = await sheetsApiClient.spreadsheets.values.append({
+        spreadsheetId: sheetConfig.spreadsheetId,
+        range: `${sheetConfig.sheetName}!A1`,
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        resource: {
+          values: [rowData],
+        },
+      });
+      
+      console.log(`[TIMING] Sheet append for ${sheetConfig.sheetName}: ${Date.now() - appendStart}ms`);
+      
+      // Extract information about where the data was appended
+      const updatedRange = appendResponse.data.updates.updatedRange;
+      console.log(`Record appended to Google Sheet ${sheetConfig.spreadsheetId}, sheet ${sheetConfig.sheetName}, range: ${updatedRange}`);
+      
+      return { sheet: sheetConfig.sheetName, range: updatedRange };
+    }, `GoogleSheet ${sheetConfig.spreadsheetId}/${sheetConfig.sheetName}`);
     
-    // Instead of querying the entire sheet, use the append method
-    // This is much faster as it automatically appends to the end of data
-    const appendResponse = await sheetsApiClient.spreadsheets.values.append({
-      spreadsheetId: sheetConfig.spreadsheetId,
-      range: `${sheetConfig.sheetName}!A1`,
-      valueInputOption: 'RAW',
-      insertDataOption: 'INSERT_ROWS',
-      resource: {
-        values: [rowData],
-      },
-    });
-    
-    // Extract information about where the data was appended
-    const updatedRange = appendResponse.data.updates.updatedRange;
-    console.log(`Record appended to Google Sheet ${sheetConfig.spreadsheetId}, sheet ${sheetConfig.sheetName}, range: ${updatedRange}`);
-    
-    return { sheet: sheetConfig.sheetName, range: updatedRange };
-  }, `Google Sheet ${sheetConfig.spreadsheetId}`);
+    const duration = Date.now() - startTime;
+    // Console log removed - we'll only log timing at the destination level
+    return result;
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    // Error logging remains at this level for debugging
+    console.error(`[TIMING] Internal Google Sheets error for ${sheetConfig.spreadsheetId}/${sheetConfig.sheetName} after ${duration}ms:`, error);
+    throw error;
+  }
 }
 
 // Function to map webhook data to Airtable record
@@ -417,10 +462,14 @@ app.post('/', async (req, res) => {
   let response;
 
   try {
+    console.log(`[TIMING] Webhook request received at ${new Date().toISOString()}`);
+    
     // Verify Zoom webhook signature
+    const verifyStart = Date.now();
     const message = `v0:${req.headers['x-zm-request-timestamp']}:${JSON.stringify(req.body)}`;
     const hashForVerify = crypto.createHmac('sha256', process.env.ZOOM_WEBHOOK_SECRET_TOKEN).update(message).digest('hex');
     const signature = `v0=${hashForVerify}`;
+    console.log(`[TIMING] Signature verification completed in ${Date.now() - verifyStart}ms`);
 
     // Check if request is authentic
     if (req.headers['x-zm-signature'] !== signature) {
@@ -428,11 +477,13 @@ app.post('/', async (req, res) => {
       console.log(response.message);
       res.status(response.status);
       res.json(response);
+      console.log(`[TIMING] Unauthorized request rejected in ${Date.now() - startTime}ms`);
       return;
     }
 
     // Handle Zoom validation challenge
     if (req.body.event === 'endpoint.url_validation') {
+      const validationStart = Date.now();
       const hashForValidate = crypto.createHmac('sha256', process.env.ZOOM_WEBHOOK_SECRET_TOKEN)
         .update(req.body.payload.plainToken).digest('hex');
 
@@ -444,9 +495,10 @@ app.post('/', async (req, res) => {
         status: 200
       };
 
-      console.log('Webhook validation response sent');
+      console.log(`[TIMING] Webhook validation response prepared in ${Date.now() - validationStart}ms`);
       res.status(response.status);
       res.json(response.message);
+      console.log(`[TIMING] Webhook validation completed in ${Date.now() - startTime}ms`);
       return;
     }
 
@@ -454,39 +506,44 @@ app.post('/', async (req, res) => {
     response = { message: 'Authorized request to Zoom Webhook Catcher.', status: 200 };
     res.status(response.status);
     res.json(response);
-    console.log(`Webhook received: ${req.body.event}, responded in ${Date.now() - startTime}ms`);
+    console.log(`[TIMING] Initial response sent in ${Date.now() - startTime}ms for event: ${req.body.event}`);
 
     // Process the webhook asynchronously (after responding to Zoom)
     processWebhook(req.body, req.headers)
       .then(() => {
-        console.log(`Webhook processing completed in ${Date.now() - startTime}ms`);
+        console.log(`[TIMING] Webhook processing completed in ${Date.now() - startTime}ms`);
       })
       .catch(error => {
-        console.error('Error in async webhook processing:', error);
+        console.error(`[TIMING] Error in async webhook processing after ${Date.now() - startTime}ms:`, error);
       });
 
   } catch (error) {
-    console.error('Error in webhook handler:', error);
+    console.error(`[TIMING] Error in webhook handler after ${Date.now() - startTime}ms:`, error);
     
     // If we haven't sent a response yet, send a 500
     if (!res.headersSent) {
       res.status(500).json({ message: 'Internal server error' });
+      console.log(`[TIMING] Error response sent in ${Date.now() - startTime}ms`);
     }
   }
 });
 
 // Async function to process webhook data after responding to Zoom
 async function processWebhook(body, headers) {
+  const processingStart = Date.now();
+  console.log(`[TIMING] Starting webhook processing for event: ${body.event}`);
+  
   try {
     // Forward the webhook if configured
     if (process.env.FORWARD_WEBHOOK_URL) {
+      const forwardStart = Date.now();
       try {
         await axios.post(process.env.FORWARD_WEBHOOK_URL, body, {
           headers: { 'Content-Type': 'application/json' }
         });
-        console.log('Webhook forwarded successfully');
+        console.log(`[TIMING] Webhook forwarding completed in ${Date.now() - forwardStart}ms`);
       } catch (error) {
-        console.error('Error forwarding webhook:', error);
+        console.error(`[TIMING] Webhook forwarding failed after ${Date.now() - forwardStart}ms:`, error);
       }
     }
     
@@ -504,13 +561,18 @@ async function processWebhook(body, headers) {
     }
     
     // Process the event data
+    const mapStart = Date.now();
     const record = mapWebhookDataToAirtableRecord(body);
+    console.log(`[TIMING] Record mapping completed in ${Date.now() - mapStart}ms`);
+    
     const meetingTopic = body.payload.object.topic || '';
     console.log(`Processing webhook for meeting topic: "${meetingTopic}"`);
     
     // Get matching destinations
+    const routingStart = Date.now();
     const config = loadConfig();
     const targetBases = determineTargetBases(meetingTopic, config);
+    console.log(`[TIMING] Destination routing completed in ${Date.now() - routingStart}ms`);
     
     if (targetBases.length === 0) {
       console.log(`No matching destinations found for topic: "${meetingTopic}"`);
@@ -530,24 +592,38 @@ async function processWebhook(body, headers) {
     // Save to all matching destinations with rate limiting protection
     const apiKey = process.env.AIRTABLE_API_KEY;
     
+    const saveStart = Date.now();
+    console.log(`[TIMING] Processing ${targetBases.length} destinations`);
+    
     // Use Promise.all with a concurrency limit for better performance
     // This allows some parallelism while avoiding overwhelming the APIs
     await processBatchesWithConcurrency(targetBases, async (destination) => {
+      const destStart = Date.now();
+      const destType = destination.type === 'googlesheet' ? 'GoogleSheet' : 'Airtable';
+      const destId = destination.type === 'googlesheet' 
+        ? `${destination.spreadsheetId}/${destination.sheetName}`
+        : `${destination.baseId}/${destination.tableId}`;
+      
+      console.log(`[TIMING] Processing ${destType}: ${destId}`);
+      
       try {
         if (destination.type === 'googlesheet') {
           await saveToGoogleSheet(record, destination);
-          console.log(`Webhook data saved to Google Sheet ${destination.spreadsheetId}/${destination.sheetName}`);
         } else {
           await saveToAirtable(record, destination, apiKey);
-          console.log(`Webhook data saved to Airtable base ${destination.baseId}/${destination.tableId}`);
         }
+        
+        console.log(`[TIMING] Completed ${destType}: ${destId} in ${Date.now() - destStart}ms`);
       } catch (error) {
-        console.error(`Failed to save to destination`, JSON.stringify(destination), `Error:`, error);
+        console.error(`[TIMING] Failed ${destType}: ${destId} after ${Date.now() - destStart}ms`, error);
       }
-    }, 8); // Process up to 8 destinations at once
+    }, 3); // Process up to 3 destinations at once
+    
+    console.log(`[TIMING] All destinations processed in ${Date.now() - saveStart}ms`);
+    console.log(`[TIMING] Total webhook processing time: ${Date.now() - processingStart}ms`);
     
   } catch (error) {
-    console.error('Error processing webhook data:', error);
+    console.error(`[TIMING] Error in webhook processing after ${Date.now() - processingStart}ms:`, error);
     throw error;
   }
 }

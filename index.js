@@ -7,6 +7,12 @@ const Airtable = require('airtable');
 const yaml = require('js-yaml');
 const fs = require('fs');
 const { google } = require('googleapis');
+const { logger, setLogLevel } = require('./logger');
+
+// Set logging level from environment variable or use default from logger
+if (process.env.LOG_LEVEL) {
+  setLogLevel(process.env.LOG_LEVEL);
+}
 
 // Global variables to cache expensive operations
 let configCache = null;
@@ -57,7 +63,7 @@ function getInitializationStatus() {
 
 // Initialize function - called once on cold start
 async function initialize() {
-  console.log('Initializing webhook handler...');
+  logger.info('Initializing webhook handler...');
   const initStart = Date.now();
 
   try {
@@ -70,7 +76,7 @@ async function initialize() {
 
       // Prefetch all Google Sheets headers
       if (sheetsApiClient) {
-        console.log(`Prefetching headers for ${config.googlesheets.length} Google Sheets...`);
+        logger.info(`Prefetching headers for ${config.googlesheets.length} Google Sheets...`);
         const prefetchStart = Date.now();
 
         // Use Promise.all to prefetch headers in parallel
@@ -84,7 +90,7 @@ async function initialize() {
                 return;
               }
 
-              console.log(`Prefetching headers for sheet: ${sheet.sheetName}`);
+              logger.debug(`Prefetching headers for sheet: ${sheet.sheetName}`);
               const sheetStart = Date.now();
 
               const headerResponse = await sheetsApiClient.spreadsheets.values.get({
@@ -94,25 +100,25 @@ async function initialize() {
 
               if (headerResponse.data.values && headerResponse.data.values[0]) {
                 sheetsHeadersCache.set(headersCacheKey, headerResponse.data.values[0]);
-                console.log(`Prefetched headers for ${sheet.sheetName} in ${Date.now() - sheetStart}ms`);
+                logger.timing(`Prefetched headers for ${sheet.sheetName} in ${Date.now() - sheetStart}ms`);
               } else {
-                console.error(`Failed to prefetch headers for ${sheet.sheetName}: No data returned`);
+                logger.error(`Failed to prefetch headers for ${sheet.sheetName}: No data returned`);
               }
             } catch (error) {
-              console.error(`Error prefetching headers for sheet ${sheet.spreadsheetId}/${sheet.sheetName}:`, error);
+              logger.error(`Error prefetching headers for sheet ${sheet.spreadsheetId}/${sheet.sheetName}:`, error);
               // We'll continue with other sheets and handle this one at runtime if needed
             }
           })
         );
 
-        console.log(`Completed prefetching headers in ${Date.now() - prefetchStart}ms`);
+        logger.timing(`Completed prefetching headers in ${Date.now() - prefetchStart}ms`);
       }
     }
 
-    console.log(`Initialization completed in ${Date.now() - initStart}ms`);
+    logger.timing(`Initialization completed in ${Date.now() - initStart}ms`);
   } catch (error) {
-    console.error('Error during initialization:', error);
-    console.log('Continuing with partial initialization');
+    logger.error('Error during initialization:', error);
+    logger.warn('Continuing with partial initialization');
   }
 }
 
@@ -124,13 +130,13 @@ function loadConfig() {
 
   try {
     const configFile = process.env.CONFIG_FILE_PATH || './config.yaml';
-    console.log(`Loading configuration from: ${configFile}`);
+    logger.info(`Loading configuration from: ${configFile}`);
     const fileContents = fs.readFileSync(configFile, 'utf8');
     const config = yaml.load(fileContents);
 
     // Safety checks
     if (!config) {
-      console.error('Configuration file is empty or invalid');
+      logger.error('Configuration file is empty or invalid');
       configCache = { bases: [], googlesheets: [] };
       return configCache;
     }
@@ -145,7 +151,7 @@ function loadConfig() {
           const regex = new RegExp(base.condition, 'i');
           regexCache.set(`base_${base.baseId}_${base.condition}`, regex);
         } catch (e) {
-          console.error(`Invalid regex in base ${base.baseId} condition: ${base.condition}`, e);
+          logger.error(`Invalid regex in base ${base.baseId} condition: ${base.condition}`, e);
         }
       }
       // Set default priority
@@ -158,7 +164,7 @@ function loadConfig() {
           const regex = new RegExp(sheet.condition, 'i');
           regexCache.set(`sheet_${sheet.spreadsheetId}_${sheet.condition}`, regex);
         } catch (e) {
-          console.error(`Invalid regex in sheet ${sheet.spreadsheetId} condition: ${sheet.condition}`, e);
+          logger.error(`Invalid regex in sheet ${sheet.spreadsheetId} condition: ${sheet.condition}`, e);
         }
       }
       // Set default priority and type
@@ -166,11 +172,11 @@ function loadConfig() {
       sheet.type = 'googlesheet';
     });
 
-    console.log(`Loaded ${config.bases.length} Airtable bases and ${config.googlesheets.length} Google Sheets configurations`);
+    logger.info(`Loaded ${config.bases.length} Airtable bases and ${config.googlesheets.length} Google Sheets configurations`);
     configCache = config;
     return configCache;
   } catch (e) {
-    console.error('Error loading configuration:', e);
+    logger.error('Error loading configuration:', e);
     configCache = { bases: [], googlesheets: [] };
     return configCache;
   }
@@ -185,11 +191,13 @@ async function initGoogleAuth() {
   try {
     if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
       // If using a credentials file path
+      logger.debug('Using GOOGLE_APPLICATION_CREDENTIALS for authentication');
       googleAuthClient = new google.auth.GoogleAuth({
         scopes: ['https://www.googleapis.com/auth/spreadsheets']
       });
     } else if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
       // If credentials are provided as a JSON string in environment
+      logger.debug('Using GOOGLE_SERVICE_ACCOUNT_KEY for authentication');
       const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
       googleAuthClient = new google.auth.JWT(
         credentials.client_email,
@@ -200,6 +208,7 @@ async function initGoogleAuth() {
       await googleAuthClient.authorize();
     } else if (process.env.FUNCTION_IDENTITY) {
       // If running on Google Cloud with proper IAM permissions
+      logger.debug('Using FUNCTION_IDENTITY for authentication');
       googleAuthClient = new google.auth.GoogleAuth({
         scopes: ['https://www.googleapis.com/auth/spreadsheets']
       });
@@ -210,10 +219,10 @@ async function initGoogleAuth() {
     // Initialize Sheets API client
     sheetsApiClient = google.sheets({ version: 'v4', auth: googleAuthClient });
 
-    console.log('Google auth initialized successfully');
+    logger.info('Google auth initialized successfully');
     return googleAuthClient;
   } catch (error) {
-    console.error('Error initializing Google auth:', error);
+    logger.error('Error initializing Google auth:', error);
     throw error;
   }
 }
@@ -254,7 +263,7 @@ async function withRetry(operation, name, maxAttempts = 5, baseDelayMs = 1000) {
 
       if (attempt > 1) {
         // Only log timing for retry successes (attempts after the first)
-        console.log(`[TIMING] Operation '${name}' succeeded on attempt ${attempt} after ${Date.now() - opStart}ms (total time with retries: ${Date.now() - startTime}ms)`);
+        logger.timing(`Operation '${name}' succeeded on attempt ${attempt} after ${Date.now() - opStart}ms (total time with retries: ${Date.now() - startTime}ms)`);
       }
 
       return result;
@@ -268,13 +277,13 @@ async function withRetry(operation, name, maxAttempts = 5, baseDelayMs = 1000) {
 
       if (isRateLimitError && attempt < maxAttempts) {
         const delay = Math.min(baseDelayMs * Math.pow(2, attempt - 1), 30000); // Cap at 30 seconds
-        console.log(`[TIMING] Rate limit hit for '${name}' after ${Date.now() - opStart}ms. Retrying in ${delay}ms (attempt ${attempt}/${maxAttempts})`);
+        logger.warn(`Rate limit hit for '${name}' after ${Date.now() - opStart}ms. Retrying in ${delay}ms (attempt ${attempt}/${maxAttempts})`);
 
         await new Promise(resolve => setTimeout(resolve, delay));
         continue;
       }
 
-      console.error(`[TIMING] Error in '${name}' (attempt ${attempt}/${maxAttempts}) after ${Date.now() - opStart}ms:`, error);
+      logger.error(`Error in '${name}' (attempt ${attempt}/${maxAttempts}) after ${Date.now() - opStart}ms:`, error);
       throw error;
     }
   }
@@ -305,7 +314,7 @@ async function saveToAirtable(record, baseConfig, apiKey) {
             }
 
             records.forEach(function (record) {
-              console.log(`Record saved to Airtable base ${baseConfig.baseId}, table ${baseConfig.tableId}: ${record.getId()}`);
+              logger.info(`Record saved to Airtable base ${baseConfig.baseId}, table ${baseConfig.tableId}: ${record.getId()}`);
             });
             resolve(records);
           }
@@ -314,12 +323,12 @@ async function saveToAirtable(record, baseConfig, apiKey) {
     }, `Airtable ${baseConfig.baseId}/${baseConfig.tableId}`);
 
     const duration = Date.now() - startTime;
-    // Console log removed - we'll only log timing at the destination level
+    // We'll only log timing at the destination level
     return result;
   } catch (error) {
     const duration = Date.now() - startTime;
     // Error logging remains at this level for debugging
-    console.error(`[TIMING] Internal Airtable error for ${baseConfig.baseId}/${baseConfig.tableId} after ${duration}ms:`, error);
+    logger.error(`Internal Airtable error for ${baseConfig.baseId}/${baseConfig.tableId} after ${duration}ms:`, error);
     throw error;
   }
 }
@@ -333,7 +342,7 @@ async function saveToGoogleSheet(record, sheetConfig) {
     if (!sheetsApiClient) {
       const authStart = Date.now();
       await initGoogleAuth();
-      console.log(`[TIMING] Google auth initialization took ${Date.now() - authStart}ms`);
+      logger.timing(`Google auth initialization took ${Date.now() - authStart}ms`);
     }
 
     const result = await withRetry(async () => {
@@ -347,7 +356,7 @@ async function saveToGoogleSheet(record, sheetConfig) {
       // If not in cache, fetch them now
       if (!headers) {
         const headersStart = Date.now();
-        console.log(`[TIMING] Headers not prefetched for ${sheetConfig.sheetName}, fetching now`);
+        logger.warn(`Headers not prefetched for ${sheetConfig.sheetName}, fetching now`);
 
         // Get the column headers from the sheet
         const headerResponse = await sheetsApiClient.spreadsheets.values.get({
@@ -361,7 +370,7 @@ async function saveToGoogleSheet(record, sheetConfig) {
 
         headers = headerResponse.data.values[0];
         sheetsHeadersCache.set(headersCacheKey, headers);
-        console.log(`[TIMING] Headers fetch for ${sheetConfig.sheetName}: ${Date.now() - headersStart}ms`);
+        logger.timing(`Headers fetch for ${sheetConfig.sheetName}: ${Date.now() - headersStart}ms`);
       }
 
       // Create an ordered row based on the headers
@@ -381,11 +390,11 @@ async function saveToGoogleSheet(record, sheetConfig) {
         },
       });
 
-      console.log(`[TIMING] Sheet append for ${sheetConfig.sheetName}: ${Date.now() - appendStart}ms`);
+      logger.timing(`Sheet append for ${sheetConfig.sheetName}: ${Date.now() - appendStart}ms`);
 
       // Extract information about where the data was appended
       const updatedRange = appendResponse.data.updates.updatedRange;
-      console.log(`Record appended to Google Sheet ${sheetConfig.spreadsheetId}, sheet ${sheetConfig.sheetName}, range: ${updatedRange}`);
+      logger.info(`Record appended to Google Sheet ${sheetConfig.spreadsheetId}, sheet ${sheetConfig.sheetName}, range: ${updatedRange}`);
 
       return { sheet: sheetConfig.sheetName, range: updatedRange };
     }, `GoogleSheet ${sheetConfig.spreadsheetId}/${sheetConfig.sheetName}`);
@@ -394,7 +403,7 @@ async function saveToGoogleSheet(record, sheetConfig) {
     return result;
   } catch (error) {
     const duration = Date.now() - startTime;
-    console.error(`[TIMING] Internal Google Sheets error for ${sheetConfig.spreadsheetId}/${sheetConfig.sheetName} after ${duration}ms:`, error);
+    logger.error(`Internal Google Sheets error for ${sheetConfig.spreadsheetId}/${sheetConfig.sheetName} after ${duration}ms:`, error);
     throw error;
   }
 }
@@ -461,7 +470,7 @@ function determineTargetBases(meetingTopic, config) {
       // If the base has no condition, consider it a match
       if (!base.condition) {
         matches = true;
-        console.log(`${logPrefix} Base ${base.baseId} matched (no condition)`);
+        logger.debug(`${logPrefix} Base ${base.baseId} matched (no condition)`);
       } else {
         // Try to match the condition using cached regex
         try {
@@ -476,10 +485,10 @@ function determineTargetBases(meetingTopic, config) {
           matches = regex.test(meetingTopic);
 
           if (matches) {
-            console.log(`${logPrefix} Base ${base.baseId} condition "${base.condition}" matched`);
+            logger.debug(`${logPrefix} Base ${base.baseId} condition "${base.condition}" matched`);
           }
         } catch (error) {
-          console.error(`Invalid regex in base ${base.baseId} condition: ${base.condition}`, error);
+          logger.error(`Invalid regex in base ${base.baseId} condition: ${base.condition}`, error);
           continue;
         }
       }
@@ -498,7 +507,7 @@ function determineTargetBases(meetingTopic, config) {
       // If the sheet has no condition, consider it a match
       if (!sheet.condition) {
         matches = true;
-        console.log(`${logPrefix} Sheet ${sheet.spreadsheetId}/${sheet.sheetName} matched (no condition)`);
+        logger.debug(`${logPrefix} Sheet ${sheet.spreadsheetId}/${sheet.sheetName} matched (no condition)`);
       } else {
         // Try to match the condition using cached regex
         try {
@@ -513,10 +522,10 @@ function determineTargetBases(meetingTopic, config) {
           matches = regex.test(meetingTopic);
 
           if (matches) {
-            console.log(`${logPrefix} Sheet ${sheet.spreadsheetId}/${sheet.sheetName} condition "${sheet.condition}" matched`);
+            logger.debug(`${logPrefix} Sheet ${sheet.spreadsheetId}/${sheet.sheetName} condition "${sheet.condition}" matched`);
           }
         } catch (error) {
-          console.error(`Invalid regex in sheet ${sheet.spreadsheetId}/${sheet.sheetName} condition: ${sheet.condition}`, error);
+          logger.error(`Invalid regex in sheet ${sheet.spreadsheetId}/${sheet.sheetName} condition: ${sheet.condition}`, error);
           continue;
         }
       }
@@ -531,9 +540,9 @@ function determineTargetBases(meetingTopic, config) {
   const sortedDestinations = matchingDestinations.sort((a, b) => a.priority - b.priority);
 
   if (sortedDestinations.length > 0) {
-    console.log(`${logPrefix} Found ${sortedDestinations.length} matching destinations`);
+    logger.info(`${logPrefix} Found ${sortedDestinations.length} matching destinations`);
   } else {
-    console.log(`${logPrefix} No matching destinations found`);
+    logger.info(`${logPrefix} No matching destinations found`);
   }
 
   return sortedDestinations;
@@ -548,7 +557,7 @@ app.use(bodyParser.json());
   try {
     await initialize();
   } catch (error) {
-    console.error('Error during async initialization:', error);
+    logger.error('Error during async initialization:', error);
   }
 })();
 
@@ -557,12 +566,12 @@ app.post('/', async (req, res) => {
   let response;
 
   try {
-    console.log(`[TIMING] Webhook request received at ${new Date().toISOString()}`);
+    logger.timing(`Webhook request received at ${new Date().toISOString()}`);
 
     // Check initialization status
     const initStatus = getInitializationStatus();
     if (!initStatus.isComplete) {
-      console.log(`[TIMING] Processing webhook while initialization still in progress:`, initStatus);
+      logger.warn(`Processing webhook while initialization still in progress:`, initStatus);
     }
 
     // Verify Zoom webhook signature
@@ -570,15 +579,15 @@ app.post('/', async (req, res) => {
     const message = `v0:${req.headers['x-zm-request-timestamp']}:${JSON.stringify(req.body)}`;
     const hashForVerify = crypto.createHmac('sha256', process.env.ZOOM_WEBHOOK_SECRET_TOKEN).update(message).digest('hex');
     const signature = `v0=${hashForVerify}`;
-    console.log(`[TIMING] Signature verification completed in ${Date.now() - verifyStart}ms`);
+    logger.debug(`Signature verification completed in ${Date.now() - verifyStart}ms`);
 
     // Check if request is authentic
     if (req.headers['x-zm-signature'] !== signature) {
       response = { message: 'Unauthorized request to Zoom Webhook Catcher.', status: 401 };
-      console.log(response.message);
+      logger.warn(response.message);
       res.status(response.status);
       res.json(response);
-      console.log(`[TIMING] Unauthorized request rejected in ${Date.now() - startTime}ms`);
+      logger.timing(`Unauthorized request rejected in ${Date.now() - startTime}ms`);
       return;
     }
 
@@ -596,10 +605,10 @@ app.post('/', async (req, res) => {
         status: 200
       };
 
-      console.log(`[TIMING] Webhook validation response prepared in ${Date.now() - validationStart}ms`);
+      logger.timing(`Webhook validation response prepared in ${Date.now() - validationStart}ms`);
       res.status(response.status);
       res.json(response.message);
-      console.log(`[TIMING] Webhook validation completed in ${Date.now() - startTime}ms`);
+      logger.timing(`Webhook validation completed in ${Date.now() - startTime}ms`);
       return;
     }
 
@@ -607,24 +616,24 @@ app.post('/', async (req, res) => {
     response = { message: 'Authorized request to Zoom Webhook Catcher.', status: 200 };
     res.status(response.status);
     res.json(response);
-    console.log(`[TIMING] Initial response sent in ${Date.now() - startTime}ms for event: ${req.body.event}`);
+    logger.timing(`Initial response sent in ${Date.now() - startTime}ms for event: ${req.body.event}`);
 
     // Process the webhook asynchronously (after responding to Zoom)
     processWebhook(req.body, req.headers)
       .then(() => {
-        console.log(`[TIMING] Webhook processing completed in ${Date.now() - startTime}ms`);
+        logger.timing(`Webhook processing completed in ${Date.now() - startTime}ms`);
       })
       .catch(error => {
-        console.error(`[TIMING] Error in async webhook processing after ${Date.now() - startTime}ms:`, error);
+        logger.error(`Error in async webhook processing after ${Date.now() - startTime}ms:`, error);
       });
 
   } catch (error) {
-    console.error(`[TIMING] Error in webhook handler after ${Date.now() - startTime}ms:`, error);
+    logger.error(`Error in webhook handler after ${Date.now() - startTime}ms:`, error);
 
     // If we haven't sent a response yet, send a 500
     if (!res.headersSent) {
       res.status(500).json({ message: 'Internal server error' });
-      console.log(`[TIMING] Error response sent in ${Date.now() - startTime}ms`);
+      logger.timing(`Error response sent in ${Date.now() - startTime}ms`);
     }
   }
 });
@@ -632,7 +641,7 @@ app.post('/', async (req, res) => {
 // Async function to process webhook data after responding to Zoom
 async function processWebhook(body, headers) {
   const processingStart = Date.now();
-  console.log(`[TIMING] Starting webhook processing for event: ${body.event}`);
+  logger.timing(`Starting webhook processing for event: ${body.event}`);
 
   try {
     // Forward the webhook if configured
@@ -642,9 +651,9 @@ async function processWebhook(body, headers) {
         await axios.post(process.env.FORWARD_WEBHOOK_URL, body, {
           headers: { 'Content-Type': 'application/json' }
         });
-        console.log(`[TIMING] Webhook forwarding completed in ${Date.now() - forwardStart}ms`);
+        logger.timing(`Webhook forwarding completed in ${Date.now() - forwardStart}ms`);
       } catch (error) {
-        console.error(`[TIMING] Webhook forwarding failed after ${Date.now() - forwardStart}ms:`, error);
+        logger.error(`Webhook forwarding failed after ${Date.now() - forwardStart}ms:`, error);
       }
     }
 
@@ -657,26 +666,26 @@ async function processWebhook(body, headers) {
     ];
 
     if (!relevantEvents.includes(body.event)) {
-      console.log(`Skipping event type: ${body.event} (not a relevant event)`);
+      logger.debug(`Skipping event type: ${body.event} (not a relevant event)`);
       return;
     }
 
     // Process the event data
     const mapStart = Date.now();
     const record = mapWebhookDataToAirtableRecord(body);
-    console.log(`[TIMING] Record mapping completed in ${Date.now() - mapStart}ms`);
+    logger.timing(`Record mapping completed in ${Date.now() - mapStart}ms`);
 
     const meetingTopic = body.payload.object.topic || '';
-    console.log(`Processing webhook for meeting topic: "${meetingTopic}"`);
+    logger.info(`Processing webhook for meeting topic: "${meetingTopic}"`);
 
     // Get matching destinations
     const routingStart = Date.now();
     const config = loadConfig();
     const targetBases = determineTargetBases(meetingTopic, config);
-    console.log(`[TIMING] Destination routing completed in ${Date.now() - routingStart}ms`);
+    logger.timing(`Destination routing completed in ${Date.now() - routingStart}ms`);
 
     if (targetBases.length === 0) {
-      console.log(`No matching destinations found for topic: "${meetingTopic}"`);
+      logger.info(`No matching destinations found for topic: "${meetingTopic}"`);
 
       // Fallback to the environment variable settings if configured
       if (process.env.AIRTABLE_API_KEY && process.env.AIRTABLE_BASE_ID && process.env.AIRTABLE_TABLE_ID) {
@@ -684,7 +693,7 @@ async function processWebhook(body, headers) {
           baseId: process.env.AIRTABLE_BASE_ID,
           tableId: process.env.AIRTABLE_TABLE_ID
         };
-        console.log('Using fallback Airtable configuration from environment variables');
+        logger.info('Using fallback Airtable configuration from environment variables');
         await saveToAirtable(record, fallbackBase, process.env.AIRTABLE_API_KEY);
       }
       return;
@@ -694,7 +703,7 @@ async function processWebhook(body, headers) {
     const apiKey = process.env.AIRTABLE_API_KEY;
 
     const saveStart = Date.now();
-    console.log(`[TIMING] Processing ${targetBases.length} destinations`);
+    logger.info(`Processing ${targetBases.length} destinations`);
 
     // Use Promise.all with a concurrency limit for better performance
     // This allows some parallelism while avoiding overwhelming the APIs
@@ -705,7 +714,7 @@ async function processWebhook(body, headers) {
         ? `${destination.spreadsheetId}/${destination.sheetName}`
         : `${destination.baseId}/${destination.tableId}`;
 
-      console.log(`[TIMING] Processing ${destType}: ${destId}`);
+      logger.debug(`Processing ${destType}: ${destId}`);
 
       try {
         if (destination.type === 'googlesheet') {
@@ -714,17 +723,17 @@ async function processWebhook(body, headers) {
           await saveToAirtable(record, destination, apiKey);
         }
 
-        console.log(`[TIMING] Completed ${destType}: ${destId} in ${Date.now() - destStart}ms`);
+        logger.timing(`Completed ${destType}: ${destId} in ${Date.now() - destStart}ms`);
       } catch (error) {
-        console.error(`[TIMING] Failed ${destType}: ${destId} after ${Date.now() - destStart}ms`, error);
+        logger.error(`Failed ${destType}: ${destId} after ${Date.now() - destStart}ms`, error);
       }
     }, 3); // Process up to 3 destinations at once
 
-    console.log(`[TIMING] All destinations processed in ${Date.now() - saveStart}ms`);
-    console.log(`[TIMING] Total webhook processing time: ${Date.now() - processingStart}ms`);
+    logger.timing(`All destinations processed in ${Date.now() - saveStart}ms`);
+    logger.timing(`Total webhook processing time: ${Date.now() - processingStart}ms`);
 
   } catch (error) {
-    console.error(`[TIMING] Error in webhook processing after ${Date.now() - processingStart}ms:`, error);
+    logger.error(`Error in webhook processing after ${Date.now() - processingStart}ms:`, error);
     throw error;
   }
 }

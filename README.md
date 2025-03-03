@@ -42,7 +42,16 @@ In terminal, run the following command to clone the repo:
 
    ```
    ZOOM_WEBHOOK_SECRET_TOKEN=ZOOM_WEBHOOK_SECRET_TOKEN_HERE
+   LOG_LEVEL=info
    ```
+   
+   The LOG_LEVEL can be set to one of the following values:
+   - `error`: Only show critical errors
+   - `warn`: Show warnings and errors
+   - `info`: Show general informational messages (default)
+   - `timing`: Show performance timing information
+   - `debug`: Show detailed debugging information
+   - `silly`: Show the most verbose output
 
    ![Zoom Webhook Secret Token](https://developers.zoom.us/img/nextImageExportOptimizer/webhook-secret-token-opt-640.WEBP "Zoom Webhook Secret Token")
 
@@ -126,6 +135,7 @@ In terminal, run the following command to clone the repo:
 1. After clicking the "Deploy to Heroku" button, enter a name for your app (or leave it blank to have a name generated for you), and insert your [Zoom Webhook Secret Token](https://developers.zoom.us/docs/api/rest/webhook-reference/#verify-webhook-events):
 
    - `ZOOM_WEBHOOK_SECRET_TOKEN` (Your Zoom Webhook Secret Token, found on your App's Features page)
+   - `LOG_LEVEL` (Optional: Set the logging level - default is 'info')
 
 1. Then click "Deploy App".
 

@@ -9,6 +9,11 @@
       "description": "Your Zoom Webhook Secret Token, found on your App's Features page",
       "value": "",
       "required": true
+    },
+    "LOG_LEVEL": {
+      "description": "Logging level (error, warn, info, timing, debug, silly)",
+      "value": "info",
+      "required": false
     }
   }
 }

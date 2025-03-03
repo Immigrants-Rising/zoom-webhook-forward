@@ -90,7 +90,7 @@ npm install
 
 # Deploy to Google Cloud Functions
 gcloud functions deploy zoomWebhook \
-  --runtime nodejs18 \
+  --runtime nodejs22 \
   --trigger-http \
   --allow-unauthenticated \
   --entry-point zoomWebhook \

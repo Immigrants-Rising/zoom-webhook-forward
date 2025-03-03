@@ -1,25 +1,35 @@
+const functions = require('@google-cloud/functions-framework');
+const express = require('express');
+const bodyParser = require('body-parser');
+const crypto = require('crypto');
+const axios = require('axios');
+const Airtable = require('airtable');
+const yaml = require('js-yaml');
+const fs = require('fs');
+const { google } = require('googleapis');
+
 // Function to determine if initialization is complete
 function isInitializationComplete() {
   // Check if we have an auth client for Google Sheets
   const hasGoogleAuth = !!googleAuthClient;
-  
+
   // Check if config is cached
   const hasConfig = !!configCache;
-  
+
   // If we have sheets configured, check if headers are prefetched
   let headersReady = true;
   if (configCache && configCache.googlesheets) {
     const totalSheets = configCache.googlesheets.length;
     const cachedSheets = sheetsHeadersCache.size;
-    
+
     if (totalSheets > 0 && cachedSheets < totalSheets) {
       headersReady = false;
     }
   }
-  
+
   return hasConfig && (
     // Either we have no Google Sheets or we have auth and headers
-    !configCache?.googlesheets?.length || 
+    !configCache?.googlesheets?.length ||
     (hasGoogleAuth && headersReady)
   );
 }
@@ -33,17 +43,9 @@ function getInitializationStatus() {
     sheetHeadersPrefetched: sheetsHeadersCache.size,
     isComplete: isInitializationComplete()
   };
-  
+
   return status;
-}const functions = require('@google-cloud/functions-framework');
-const express = require('express');
-const bodyParser = require('body-parser');
-const crypto = require('crypto');
-const axios = require('axios');
-const Airtable = require('airtable');
-const yaml = require('js-yaml');
-const fs = require('fs');
-const {google} = require('googleapis');
+}
 
 // Global variables to cache expensive operations
 let configCache = null;
@@ -57,39 +59,39 @@ const sheetsHeadersCache = new Map();  // Cache for sheet headers
 async function initialize() {
   console.log('Initializing webhook handler...');
   const initStart = Date.now();
-  
+
   try {
     // Pre-load configuration
     const config = loadConfig();
-    
+
     // Pre-initialize Google auth
     if (config.googlesheets && config.googlesheets.length > 0) {
       await initGoogleAuth();
-      
+
       // Prefetch all Google Sheets headers
       if (sheetsApiClient) {
         console.log(`Prefetching headers for ${config.googlesheets.length} Google Sheets...`);
         const prefetchStart = Date.now();
-        
+
         // Use Promise.all to prefetch headers in parallel
         await Promise.all(
           config.googlesheets.map(async (sheet) => {
             try {
               const headersCacheKey = `${sheet.spreadsheetId}_${sheet.sheetName}`;
-              
+
               // Skip if already cached
               if (sheetsHeadersCache.has(headersCacheKey)) {
                 return;
               }
-              
+
               console.log(`Prefetching headers for sheet: ${sheet.sheetName}`);
               const sheetStart = Date.now();
-              
+
               const headerResponse = await sheetsApiClient.spreadsheets.values.get({
                 spreadsheetId: sheet.spreadsheetId,
                 range: `${sheet.sheetName}!1:1`,
               });
-              
+
               if (headerResponse.data.values && headerResponse.data.values[0]) {
                 sheetsHeadersCache.set(headersCacheKey, headerResponse.data.values[0]);
                 console.log(`Prefetched headers for ${sheet.sheetName} in ${Date.now() - sheetStart}ms`);
@@ -102,11 +104,11 @@ async function initialize() {
             }
           })
         );
-        
+
         console.log(`Completed prefetching headers in ${Date.now() - prefetchStart}ms`);
       }
     }
-    
+
     console.log(`Initialization completed in ${Date.now() - initStart}ms`);
   } catch (error) {
     console.error('Error during initialization:', error);
@@ -119,23 +121,23 @@ function loadConfig() {
   if (configCache) {
     return configCache;
   }
-  
+
   try {
     const configFile = process.env.CONFIG_FILE_PATH || './config.yaml';
     console.log(`Loading configuration from: ${configFile}`);
     const fileContents = fs.readFileSync(configFile, 'utf8');
     const config = yaml.load(fileContents);
-    
+
     // Safety checks
     if (!config) {
       console.error('Configuration file is empty or invalid');
       configCache = { bases: [], googlesheets: [] };
       return configCache;
     }
-    
+
     if (!config.bases) config.bases = [];
     if (!config.googlesheets) config.googlesheets = [];
-    
+
     // Pre-compile all regex patterns for faster matching
     config.bases.forEach(base => {
       if (base.condition) {
@@ -149,7 +151,7 @@ function loadConfig() {
       // Set default priority
       base.priority = base.priority || 100;
     });
-    
+
     config.googlesheets.forEach(sheet => {
       if (sheet.condition) {
         try {
@@ -163,7 +165,7 @@ function loadConfig() {
       sheet.priority = sheet.priority || 100;
       sheet.type = 'googlesheet';
     });
-    
+
     console.log(`Loaded ${config.bases.length} Airtable bases and ${config.googlesheets.length} Google Sheets configurations`);
     configCache = config;
     return configCache;
@@ -179,7 +181,7 @@ async function initGoogleAuth() {
   if (googleAuthClient) {
     return googleAuthClient;
   }
-  
+
   try {
     if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
       // If using a credentials file path
@@ -204,10 +206,10 @@ async function initGoogleAuth() {
     } else {
       throw new Error('No Google authentication method available. Please set up credentials.');
     }
-    
+
     // Initialize Sheets API client
     sheetsApiClient = google.sheets({ version: 'v4', auth: googleAuthClient });
-    
+
     console.log('Google auth initialized successfully');
     return googleAuthClient;
   } catch (error) {
@@ -219,20 +221,20 @@ async function initGoogleAuth() {
 // Get cached Airtable base instance
 function getAirtableBase(apiKey, baseId) {
   const cacheKey = `${apiKey}_${baseId}`;
-  
+
   if (!airtableBaseCache.has(cacheKey)) {
-    const base = new Airtable({apiKey}).base(baseId);
+    const base = new Airtable({ apiKey }).base(baseId);
     airtableBaseCache.set(cacheKey, base);
     return base;
   }
-  
+
   return airtableBaseCache.get(cacheKey);
 }
 
 // Helper function to apply field mappings to a record
 function applyFieldMappings(record, fieldMappings) {
-  if (!fieldMappings) return {...record};
-  
+  if (!fieldMappings) return { ...record };
+
   return Object.keys(record).reduce((mapped, key) => {
     const mappedKey = fieldMappings[key] || key;
     mapped[mappedKey] = record[key];
@@ -244,54 +246,54 @@ function applyFieldMappings(record, fieldMappings) {
 async function withRetry(operation, name, maxAttempts = 5, baseDelayMs = 1000) {
   let lastError;
   const startTime = Date.now();
-  
+
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const opStart = Date.now();
       const result = await operation();
-      
+
       if (attempt > 1) {
         // Only log timing for retry successes (attempts after the first)
         console.log(`[TIMING] Operation '${name}' succeeded on attempt ${attempt} after ${Date.now() - opStart}ms (total time with retries: ${Date.now() - startTime}ms)`);
       }
-      
+
       return result;
     } catch (error) {
       lastError = error;
-      
+
       // Check if it's a rate limiting error (429)
-      const isRateLimitError = error.statusCode === 429 || 
-                              (error.code === 429) || 
-                              (error.message && error.message.includes('quota'));
-      
+      const isRateLimitError = error.statusCode === 429 ||
+        (error.code === 429) ||
+        (error.message && error.message.includes('quota'));
+
       if (isRateLimitError && attempt < maxAttempts) {
         const delay = Math.min(baseDelayMs * Math.pow(2, attempt - 1), 30000); // Cap at 30 seconds
         console.log(`[TIMING] Rate limit hit for '${name}' after ${Date.now() - opStart}ms. Retrying in ${delay}ms (attempt ${attempt}/${maxAttempts})`);
-        
+
         await new Promise(resolve => setTimeout(resolve, delay));
         continue;
       }
-      
+
       console.error(`[TIMING] Error in '${name}' (attempt ${attempt}/${maxAttempts}) after ${Date.now() - opStart}ms:`, error);
       throw error;
     }
   }
-  
+
   throw lastError;
 }
 
 // Function to save record to a specific Airtable base and table with retry logic
 async function saveToAirtable(record, baseConfig, apiKey) {
   const startTime = Date.now();
-  
+
   try {
     const result = await withRetry(async () => {
       const base = getAirtableBase(apiKey, baseConfig.baseId);
       const table = base(baseConfig.tableId);
-      
+
       // Apply field mappings if specified
       const mappedRecord = applyFieldMappings(record, baseConfig.fieldMappings);
-      
+
       // Save the record to Airtable
       return new Promise((resolve, reject) => {
         table.create(
@@ -301,7 +303,7 @@ async function saveToAirtable(record, baseConfig, apiKey) {
               reject(err);
               return;
             }
-            
+
             records.forEach(function (record) {
               console.log(`Record saved to Airtable base ${baseConfig.baseId}, table ${baseConfig.tableId}: ${record.getId()}`);
             });
@@ -310,7 +312,7 @@ async function saveToAirtable(record, baseConfig, apiKey) {
         );
       });
     }, `Airtable ${baseConfig.baseId}/${baseConfig.tableId}`);
-    
+
     const duration = Date.now() - startTime;
     // Console log removed - we'll only log timing at the destination level
     return result;
@@ -325,7 +327,7 @@ async function saveToAirtable(record, baseConfig, apiKey) {
 // Function to save record to a specific Google Sheet
 async function saveToGoogleSheet(record, sheetConfig) {
   const startTime = Date.now();
-  
+
   try {
     // Ensure Google auth is initialized
     if (!sheetsApiClient) {
@@ -333,41 +335,41 @@ async function saveToGoogleSheet(record, sheetConfig) {
       await initGoogleAuth();
       console.log(`[TIMING] Google auth initialization took ${Date.now() - authStart}ms`);
     }
-    
+
     const result = await withRetry(async () => {
       // Apply field mappings if specified
       const mappedRecord = applyFieldMappings(record, sheetConfig.fieldMappings);
-      
+
       // Get headers from cache
       const headersCacheKey = `${sheetConfig.spreadsheetId}_${sheetConfig.sheetName}`;
       let headers = sheetsHeadersCache.get(headersCacheKey);
-      
+
       // If not in cache, fetch them now
       if (!headers) {
         const headersStart = Date.now();
         console.log(`[TIMING] Headers not prefetched for ${sheetConfig.sheetName}, fetching now`);
-        
+
         // Get the column headers from the sheet
         const headerResponse = await sheetsApiClient.spreadsheets.values.get({
           spreadsheetId: sheetConfig.spreadsheetId,
           range: `${sheetConfig.sheetName}!1:1`,
         });
-        
+
         if (!headerResponse.data.values || !headerResponse.data.values[0]) {
           throw new Error(`No headers found in sheet ${sheetConfig.sheetName}`);
         }
-        
+
         headers = headerResponse.data.values[0];
         sheetsHeadersCache.set(headersCacheKey, headers);
         console.log(`[TIMING] Headers fetch for ${sheetConfig.sheetName}: ${Date.now() - headersStart}ms`);
       }
-      
+
       // Create an ordered row based on the headers
       const rowData = headers.map(header => mappedRecord[header] || '');
-      
+
       // Append the data
       const appendStart = Date.now();
-      
+
       // Use the append method for better performance
       const appendResponse = await sheetsApiClient.spreadsheets.values.append({
         spreadsheetId: sheetConfig.spreadsheetId,
@@ -378,16 +380,16 @@ async function saveToGoogleSheet(record, sheetConfig) {
           values: [rowData],
         },
       });
-      
+
       console.log(`[TIMING] Sheet append for ${sheetConfig.sheetName}: ${Date.now() - appendStart}ms`);
-      
+
       // Extract information about where the data was appended
       const updatedRange = appendResponse.data.updates.updatedRange;
       console.log(`Record appended to Google Sheet ${sheetConfig.spreadsheetId}, sheet ${sheetConfig.sheetName}, range: ${updatedRange}`);
-      
+
       return { sheet: sheetConfig.sheetName, range: updatedRange };
     }, `GoogleSheet ${sheetConfig.spreadsheetId}/${sheetConfig.sheetName}`);
-    
+
     const duration = Date.now() - startTime;
     return result;
   } catch (error) {
@@ -403,7 +405,7 @@ function mapWebhookDataToAirtableRecord(webhookData) {
   const payload = webhookData.payload;
   const object = payload.object;
   const participant = object.participant;
-  
+
   // Base record with common fields
   const record = {
     "Event Type": eventType,
@@ -427,7 +429,7 @@ function mapWebhookDataToAirtableRecord(webhookData) {
     "Customer Key": participant.customer_key,
     "Phone Number": participant.phone_number
   };
-  
+
   // Handle event-specific fields
   if (eventType === "webinar.participant_joined") {
     record["Event Datetime"] = participant.join_time;
@@ -442,7 +444,7 @@ function mapWebhookDataToAirtableRecord(webhookData) {
     record["Leave Reason"] = participant.leave_reason;
     record["Event Datetime"] = participant.date_time;
   }
-  
+
   return record;
 }
 
@@ -450,12 +452,12 @@ function mapWebhookDataToAirtableRecord(webhookData) {
 function determineTargetBases(meetingTopic, config) {
   const matchingDestinations = [];
   const logPrefix = `[Topic Match: ${meetingTopic}]`;
-  
+
   // Process Airtable bases
   if (config.bases) {
     for (const base of config.bases) {
       let matches = false;
-      
+
       // If the base has no condition, consider it a match
       if (!base.condition) {
         matches = true;
@@ -465,14 +467,14 @@ function determineTargetBases(meetingTopic, config) {
         try {
           const cacheKey = `base_${base.baseId}_${base.condition}`;
           let regex = regexCache.get(cacheKey);
-          
+
           if (!regex) {
             regex = new RegExp(base.condition, 'i');
             regexCache.set(cacheKey, regex);
           }
-          
+
           matches = regex.test(meetingTopic);
-          
+
           if (matches) {
             console.log(`${logPrefix} Base ${base.baseId} condition "${base.condition}" matched`);
           }
@@ -481,18 +483,18 @@ function determineTargetBases(meetingTopic, config) {
           continue;
         }
       }
-      
+
       if (matches) {
         matchingDestinations.push(base);
       }
     }
   }
-  
+
   // Process Google Sheets
   if (config.googlesheets) {
     for (const sheet of config.googlesheets) {
       let matches = false;
-      
+
       // If the sheet has no condition, consider it a match
       if (!sheet.condition) {
         matches = true;
@@ -502,14 +504,14 @@ function determineTargetBases(meetingTopic, config) {
         try {
           const cacheKey = `sheet_${sheet.spreadsheetId}_${sheet.condition}`;
           let regex = regexCache.get(cacheKey);
-          
+
           if (!regex) {
             regex = new RegExp(sheet.condition, 'i');
             regexCache.set(cacheKey, regex);
           }
-          
+
           matches = regex.test(meetingTopic);
-          
+
           if (matches) {
             console.log(`${logPrefix} Sheet ${sheet.spreadsheetId}/${sheet.sheetName} condition "${sheet.condition}" matched`);
           }
@@ -518,22 +520,22 @@ function determineTargetBases(meetingTopic, config) {
           continue;
         }
       }
-      
+
       if (matches) {
         matchingDestinations.push(sheet);
       }
     }
   }
-  
+
   // Sort destinations by priority (lower numbers first)
   const sortedDestinations = matchingDestinations.sort((a, b) => a.priority - b.priority);
-  
+
   if (sortedDestinations.length > 0) {
     console.log(`${logPrefix} Found ${sortedDestinations.length} matching destinations`);
   } else {
     console.log(`${logPrefix} No matching destinations found`);
   }
-  
+
   return sortedDestinations;
 }
 
@@ -542,7 +544,7 @@ const app = express();
 app.use(bodyParser.json());
 
 // Run initialization asynchronously on module load
-(async function() {
+(async function () {
   try {
     await initialize();
   } catch (error) {
@@ -556,13 +558,13 @@ app.post('/', async (req, res) => {
 
   try {
     console.log(`[TIMING] Webhook request received at ${new Date().toISOString()}`);
-    
+
     // Check initialization status
     const initStatus = getInitializationStatus();
     if (!initStatus.isComplete) {
       console.log(`[TIMING] Processing webhook while initialization still in progress:`, initStatus);
     }
-    
+
     // Verify Zoom webhook signature
     const verifyStart = Date.now();
     const message = `v0:${req.headers['x-zm-request-timestamp']}:${JSON.stringify(req.body)}`;
@@ -618,7 +620,7 @@ app.post('/', async (req, res) => {
 
   } catch (error) {
     console.error(`[TIMING] Error in webhook handler after ${Date.now() - startTime}ms:`, error);
-    
+
     // If we haven't sent a response yet, send a 500
     if (!res.headersSent) {
       res.status(500).json({ message: 'Internal server error' });
@@ -631,7 +633,7 @@ app.post('/', async (req, res) => {
 async function processWebhook(body, headers) {
   const processingStart = Date.now();
   console.log(`[TIMING] Starting webhook processing for event: ${body.event}`);
-  
+
   try {
     // Forward the webhook if configured
     if (process.env.FORWARD_WEBHOOK_URL) {
@@ -645,7 +647,7 @@ async function processWebhook(body, headers) {
         console.error(`[TIMING] Webhook forwarding failed after ${Date.now() - forwardStart}ms:`, error);
       }
     }
-    
+
     // Check if this is a relevant event to process
     const relevantEvents = [
       'webinar.participant_joined',
@@ -653,29 +655,29 @@ async function processWebhook(body, headers) {
       'meeting.participant_joined',
       'meeting.participant_left'
     ];
-    
+
     if (!relevantEvents.includes(body.event)) {
       console.log(`Skipping event type: ${body.event} (not a relevant event)`);
       return;
     }
-    
+
     // Process the event data
     const mapStart = Date.now();
     const record = mapWebhookDataToAirtableRecord(body);
     console.log(`[TIMING] Record mapping completed in ${Date.now() - mapStart}ms`);
-    
+
     const meetingTopic = body.payload.object.topic || '';
     console.log(`Processing webhook for meeting topic: "${meetingTopic}"`);
-    
+
     // Get matching destinations
     const routingStart = Date.now();
     const config = loadConfig();
     const targetBases = determineTargetBases(meetingTopic, config);
     console.log(`[TIMING] Destination routing completed in ${Date.now() - routingStart}ms`);
-    
+
     if (targetBases.length === 0) {
       console.log(`No matching destinations found for topic: "${meetingTopic}"`);
-      
+
       // Fallback to the environment variable settings if configured
       if (process.env.AIRTABLE_API_KEY && process.env.AIRTABLE_BASE_ID && process.env.AIRTABLE_TABLE_ID) {
         const fallbackBase = {
@@ -687,40 +689,40 @@ async function processWebhook(body, headers) {
       }
       return;
     }
-    
+
     // Save to all matching destinations with rate limiting protection
     const apiKey = process.env.AIRTABLE_API_KEY;
-    
+
     const saveStart = Date.now();
     console.log(`[TIMING] Processing ${targetBases.length} destinations`);
-    
+
     // Use Promise.all with a concurrency limit for better performance
     // This allows some parallelism while avoiding overwhelming the APIs
     await processBatchesWithConcurrency(targetBases, async (destination) => {
       const destStart = Date.now();
       const destType = destination.type === 'googlesheet' ? 'GoogleSheet' : 'Airtable';
-      const destId = destination.type === 'googlesheet' 
+      const destId = destination.type === 'googlesheet'
         ? `${destination.spreadsheetId}/${destination.sheetName}`
         : `${destination.baseId}/${destination.tableId}`;
-      
+
       console.log(`[TIMING] Processing ${destType}: ${destId}`);
-      
+
       try {
         if (destination.type === 'googlesheet') {
           await saveToGoogleSheet(record, destination);
         } else {
           await saveToAirtable(record, destination, apiKey);
         }
-        
+
         console.log(`[TIMING] Completed ${destType}: ${destId} in ${Date.now() - destStart}ms`);
       } catch (error) {
         console.error(`[TIMING] Failed ${destType}: ${destId} after ${Date.now() - destStart}ms`, error);
       }
     }, 3); // Process up to 3 destinations at once
-    
+
     console.log(`[TIMING] All destinations processed in ${Date.now() - saveStart}ms`);
     console.log(`[TIMING] Total webhook processing time: ${Date.now() - processingStart}ms`);
-    
+
   } catch (error) {
     console.error(`[TIMING] Error in webhook processing after ${Date.now() - processingStart}ms:`, error);
     throw error;
@@ -731,12 +733,12 @@ async function processWebhook(body, headers) {
 async function processBatchesWithConcurrency(items, processor, concurrency = 3) {
   const results = [];
   const batches = [];
-  
+
   // Split items into batches based on concurrency
   for (let i = 0; i < items.length; i += concurrency) {
     batches.push(items.slice(i, i + concurrency));
   }
-  
+
   // Process each batch sequentially, but items within a batch in parallel
   for (const batch of batches) {
     const batchResults = await Promise.all(
@@ -744,7 +746,7 @@ async function processBatchesWithConcurrency(items, processor, concurrency = 3) 
     );
     results.push(...batchResults);
   }
-  
+
   return results;
 }
 

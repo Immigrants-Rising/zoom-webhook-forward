@@ -188,7 +188,7 @@ async function processWebhookData(filePath, batchSize = 5, delayMs = 1000) {
 
 // Function to test Unicode decoding
 function testUnicodeHandling() {
-  const testString = 'Hugo L\\u00f3pez Mu\\u00f1oz';
+  const testString = 'Connor L\\u00f3pez A\\u00f1ejo';
   console.log('Original escaped string:', testString);
   
   // When the JSON parser processes the file, it will automatically convert

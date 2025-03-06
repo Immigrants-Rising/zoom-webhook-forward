@@ -94,7 +94,7 @@ gcloud functions deploy zoomWebhook \
   --trigger-http \
   --allow-unauthenticated \
   --entry-point zoomWebhook \
-  --set-env-vars AIRTABLE_API_KEY=your_key,ZOOM_WEBHOOK_SECRET_TOKEN=your_token
+  --env-vars-file .env.yaml
 ```
 
 ## Usage

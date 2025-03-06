@@ -1,5 +1,11 @@
 const winston = require('winston');
 
+// Imports the Google Cloud client library for Winston
+const {LoggingWinston} = require('@google-cloud/logging-winston');
+
+// Creates a client
+const loggingWinston = new LoggingWinston();
+
 // Define log levels and colors
 const logLevels = {
   levels: {
@@ -43,7 +49,8 @@ const logger = winston.createLogger({
           return `${timestamp} [${level.toUpperCase()}] ${message}${restString}`;
         })
       )
-    })
+    }),
+    loggingWinston
   ]
 });
 

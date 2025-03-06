@@ -257,8 +257,8 @@ async function withRetry(operation, name, maxAttempts = 5, baseDelayMs = 1000) {
   const startTime = Date.now();
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const opStart = Date.now();
     try {
-      const opStart = Date.now();
       const result = await operation();
 
       if (attempt > 1) {

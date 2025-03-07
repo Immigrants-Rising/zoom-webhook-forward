@@ -1,4 +1,5 @@
 const winston = require('winston');
+const crypto = require('crypto');
 
 // Imports the Google Cloud client library for Winston
 const {LoggingWinston} = require('@google-cloud/logging-winston');
@@ -29,24 +30,102 @@ const logLevels = {
 // Apply colors to Winston
 winston.addColors(logLevels.colors);
 
+// Store request IDs for traceability
+const requestStore = new Map();
+const REQUEST_ID_TIMEOUT = 30 * 60 * 1000; // Clear request IDs after 30 minutes
+
+// Periodically clean up old request IDs to prevent memory leaks
+setInterval(() => {
+  const now = Date.now();
+  for (const [requestId, timestamp] of requestStore.entries()) {
+    if (now - timestamp > REQUEST_ID_TIMEOUT) {
+      requestStore.delete(requestId);
+    }
+  }
+}, 5 * 60 * 1000); // Run cleanup every 5 minutes
+
+// Function to generate or retrieve a request ID
+function getRequestId(requestIdFromHeader) {
+  let requestId;
+  
+  if (requestIdFromHeader) {
+    // Use existing request ID from header if provided
+    requestId = requestIdFromHeader;
+  } else {
+    // Generate a new unique request ID
+    requestId = crypto.randomUUID();
+  }
+  
+  // Store the request ID with timestamp for cleanup
+  requestStore.set(requestId, Date.now());
+  
+  return requestId;
+}
+
 // Create the logger instance
 const logger = winston.createLogger({
   levels: logLevels.levels,
   level: process.env.LOG_LEVEL || 'info', // Default to info, can be overridden by environment variable
   format: winston.format.combine(
     winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
-    winston.format.printf(({ timestamp, level, message, ...rest }) => {
+    winston.format.printf(({ timestamp, level, message, requestId, meetingId, eventType, ...rest }) => {
+      // Format metadata for better readability
+      const metaFields = [];
+      
+      // Add request ID if available
+      if (requestId) {
+        metaFields.push(`reqId=${requestId}`);
+      }
+      
+      // Add meeting ID if available
+      if (meetingId) {
+        metaFields.push(`mtgId=${meetingId}`);
+      }
+      
+      // Add event type if available
+      if (eventType) {
+        metaFields.push(`event=${eventType}`);
+      }
+      
+      // Add metadata prefix
+      const metaPrefix = metaFields.length > 0 ? `[${metaFields.join('|')}] ` : '';
+      
+      // Format any remaining metadata
       const restString = Object.keys(rest).length ? ` ${JSON.stringify(rest)}` : '';
-      return `${timestamp} [${level.toUpperCase()}] ${message}${restString}`;
+      
+      return `${timestamp} [${level.toUpperCase()}] ${metaPrefix}${message}${restString}`;
     })
   ),
   transports: [
     new winston.transports.Console({
       format: winston.format.combine(
         winston.format.colorize({ all: true }),
-        winston.format.printf(({ timestamp, level, message, ...rest }) => {
+        winston.format.printf(({ timestamp, level, message, requestId, meetingId, eventType, ...rest }) => {
+          // Format metadata for better readability
+          const metaFields = [];
+          
+          // Add request ID if available
+          if (requestId) {
+            metaFields.push(`reqId=${requestId}`);
+          }
+          
+          // Add meeting ID if available
+          if (meetingId) {
+            metaFields.push(`mtgId=${meetingId}`);
+          }
+          
+          // Add event type if available
+          if (eventType) {
+            metaFields.push(`event=${eventType}`);
+          }
+          
+          // Add metadata prefix
+          const metaPrefix = metaFields.length > 0 ? `[${metaFields.join('|')}] ` : '';
+          
+          // Format any remaining metadata
           const restString = Object.keys(rest).length ? ` ${JSON.stringify(rest)}` : '';
-          return `${timestamp} [${level.toUpperCase()}] ${message}${restString}`;
+          
+          return `${timestamp} [${level.toUpperCase()}] ${metaPrefix}${message}${restString}`;
         })
       )
     }),
@@ -74,5 +153,6 @@ function setLogLevel(level) {
 
 module.exports = {
   logger,
-  setLogLevel
+  setLogLevel,
+  getRequestId
 };

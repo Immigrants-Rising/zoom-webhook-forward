@@ -184,11 +184,14 @@ function loadConfig() {
 
 // Pre-initialize Google auth client
 async function initGoogleAuth() {
-  if (googleAuthClient) {
-    return googleAuthClient;
-  }
-
   try {
+    // Reset the client if we're reinitializing
+    if (googleAuthClient) {
+      logger.debug('Re-initializing Google auth after previous initialization');
+      googleAuthClient = null;
+      sheetsApiClient = null;
+    }
+
     if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
       // If using a credentials file path
       logger.debug('Using GOOGLE_APPLICATION_CREDENTIALS for authentication');
@@ -218,11 +221,18 @@ async function initGoogleAuth() {
 
     // Initialize Sheets API client
     sheetsApiClient = google.sheets({ version: 'v4', auth: googleAuthClient });
+    
+    // Verify the client was created successfully
+    if (!sheetsApiClient || !sheetsApiClient.spreadsheets) {
+      throw new Error('Failed to initialize Google Sheets API client');
+    }
 
     logger.info('Google auth initialized successfully');
     return googleAuthClient;
   } catch (error) {
     logger.error('Error initializing Google auth:', error);
+    googleAuthClient = null;
+    sheetsApiClient = null;
     throw error;
   }
 }
@@ -345,6 +355,11 @@ async function saveToGoogleSheet(record, sheetConfig) {
       logger.timing(`Google auth initialization took ${Date.now() - authStart}ms`);
     }
 
+    // Double check that sheetsApiClient was successfully initialized
+    if (!sheetsApiClient) {
+      throw new Error('Failed to initialize Google Sheets API client after initGoogleAuth()');
+    }
+
     const result = await withRetry(async () => {
       // Apply field mappings if specified
       const mappedRecord = applyFieldMappings(record, sheetConfig.fieldMappings);
@@ -357,6 +372,16 @@ async function saveToGoogleSheet(record, sheetConfig) {
       if (!headers) {
         const headersStart = Date.now();
         logger.warn(`Headers not prefetched for ${sheetConfig.sheetName}, fetching now`);
+
+        // Verify sheetsApiClient is still valid before using it
+        if (!sheetsApiClient || !sheetsApiClient.spreadsheets) {
+          logger.warn('Sheets API client invalid, re-initializing...');
+          await initGoogleAuth();
+          
+          if (!sheetsApiClient || !sheetsApiClient.spreadsheets) {
+            throw new Error('Google Sheets API client unavailable after re-initialization');
+          }
+        }
 
         // Get the column headers from the sheet
         const headerResponse = await sheetsApiClient.spreadsheets.values.get({
@@ -378,6 +403,16 @@ async function saveToGoogleSheet(record, sheetConfig) {
 
       // Append the data
       const appendStart = Date.now();
+
+      // Verify sheetsApiClient is still valid before using it
+      if (!sheetsApiClient || !sheetsApiClient.spreadsheets) {
+        logger.warn('Sheets API client invalid before append, re-initializing...');
+        await initGoogleAuth();
+        
+        if (!sheetsApiClient || !sheetsApiClient.spreadsheets) {
+          throw new Error('Google Sheets API client unavailable after re-initialization');
+        }
+      }
 
       // Use the append method for better performance
       const appendResponse = await sheetsApiClient.spreadsheets.values.append({

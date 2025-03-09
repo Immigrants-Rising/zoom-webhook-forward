@@ -346,6 +346,7 @@ async function saveToAirtable(record, baseConfig, apiKey, requestId) {
       return new Promise((resolve, reject) => {
         table.create(
           [{ fields: mappedRecord }],
+          { typecast: true },
           function (err, records) {
             if (err) {
               reject(err);

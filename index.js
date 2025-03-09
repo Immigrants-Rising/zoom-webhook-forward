@@ -8,6 +8,7 @@ const yaml = require('js-yaml');
 const fs = require('fs');
 const { google } = require('googleapis');
 const { logger, setLogLevel, getRequestId } = require('./logger');
+const e = require('express');
 
 // Set logging level from environment variable or use default from logger
 if (process.env.LOG_LEVEL) {
@@ -738,6 +739,11 @@ app.post('/', async (req, res) => {
 
     // Handle Zoom validation challenge
     if (req.body.event === 'endpoint.url_validation') {
+      logger.info('Zoom URL validation request received', {
+        requestId,
+        eventType,
+        meetingId
+      });
       const validationStart = Date.now();
       const hashForValidate = crypto.createHmac('sha256', process.env.ZOOM_WEBHOOK_SECRET_TOKEN)
         .update(req.body.payload.plainToken).digest('hex');

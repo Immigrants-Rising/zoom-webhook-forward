@@ -3,12 +3,15 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const crypto = require('crypto');
 const axios = require('axios');
-const Airtable = require('airtable');
-const yaml = require('js-yaml');
-const fs = require('fs');
-const { google } = require('googleapis');
+// Load heavy dependencies lazily to speed up function cold starts
+let Airtable;
+let yaml;
+let fs;
+let google;
+let e;
+
+// Import logger early since we need it for validation
 const { logger, setLogLevel, getRequestId } = require('./logger');
-const e = require('express');
 
 // Set logging level from environment variable or use default from logger
 if (process.env.LOG_LEVEL) {
@@ -22,6 +25,8 @@ let sheetsApiClient = null;
 const regexCache = new Map();
 const airtableBaseCache = new Map();
 const sheetsHeadersCache = new Map();  // Cache for sheet headers
+let isInitializing = false;
+let initializationPromise = null;
 
 // Function to determine if initialization is complete
 function isInitializationComplete() {
@@ -62,65 +67,90 @@ function getInitializationStatus() {
   return status;
 }
 
-// Initialize function - called once on cold start
+// Initialize function - called once on cold start but doesn't block validation
 async function initialize() {
-  logger.info('Initializing webhook handler...');
-  const initStart = Date.now();
-
-  try {
-    // Pre-load configuration
-    const config = loadConfig();
-
-    // Pre-initialize Google auth
-    if (config.googlesheets && config.googlesheets.length > 0) {
-      await initGoogleAuth();
-
-      // Prefetch all Google Sheets headers
-      if (sheetsApiClient) {
-        logger.info(`Prefetching headers for ${config.googlesheets.length} Google Sheets...`);
-        const prefetchStart = Date.now();
-
-        // Use Promise.all to prefetch headers in parallel
-        await Promise.all(
-          config.googlesheets.map(async (sheet) => {
-            try {
-              const headersCacheKey = `${sheet.spreadsheetId}_${sheet.sheetName}`;
-
-              // Skip if already cached
-              if (sheetsHeadersCache.has(headersCacheKey)) {
-                return;
-              }
-
-              logger.debug(`Prefetching headers for sheet: ${sheet.sheetName}`);
-              const sheetStart = Date.now();
-
-              const headerResponse = await sheetsApiClient.spreadsheets.values.get({
-                spreadsheetId: sheet.spreadsheetId,
-                range: `${sheet.sheetName}!1:1`,
-              });
-
-              if (headerResponse.data.values && headerResponse.data.values[0]) {
-                sheetsHeadersCache.set(headersCacheKey, headerResponse.data.values[0]);
-                logger.timing(`Prefetched headers for ${sheet.sheetName} in ${Date.now() - sheetStart}ms`);
-              } else {
-                logger.error(`Failed to prefetch headers for ${sheet.sheetName}: No data returned`);
-              }
-            } catch (error) {
-              logger.error(`Error prefetching headers for sheet ${sheet.spreadsheetId}/${sheet.sheetName}:`, error);
-              // We'll continue with other sheets and handle this one at runtime if needed
-            }
-          })
-        );
-
-        logger.timing(`Completed prefetching headers in ${Date.now() - prefetchStart}ms`);
-      }
-    }
-
-    logger.timing(`Initialization completed in ${Date.now() - initStart}ms`);
-  } catch (error) {
-    logger.error('Error during initialization:', error);
-    logger.warn('Continuing with partial initialization');
+  if (isInitializing) {
+    return initializationPromise;
   }
+  
+  isInitializing = true;
+  
+  // Create a promise to track initialization
+  initializationPromise = (async () => {
+    logger.info('Initializing webhook handler...');
+    const initStart = Date.now();
+
+    try {
+      // Lazy-load heavy dependencies
+      if (!Airtable) Airtable = require('airtable');
+      if (!yaml) yaml = require('js-yaml');
+      if (!fs) fs = require('fs');
+      if (!google) {
+        const googleApi = require('googleapis');
+        google = googleApi.google;
+      }
+      if (!e) e = require('express');
+      
+      // Pre-load configuration
+      const config = loadConfig();
+
+      // Pre-initialize Google auth
+      if (config.googlesheets && config.googlesheets.length > 0) {
+        await initGoogleAuth();
+
+        // Prefetch all Google Sheets headers
+        if (sheetsApiClient) {
+          logger.info(`Prefetching headers for ${config.googlesheets.length} Google Sheets...`);
+          const prefetchStart = Date.now();
+
+          // Use Promise.all to prefetch headers in parallel
+          await Promise.all(
+            config.googlesheets.map(async (sheet) => {
+              try {
+                const headersCacheKey = `${sheet.spreadsheetId}_${sheet.sheetName}`;
+
+                // Skip if already cached
+                if (sheetsHeadersCache.has(headersCacheKey)) {
+                  return;
+                }
+
+                logger.debug(`Prefetching headers for sheet: ${sheet.sheetName}`);
+                const sheetStart = Date.now();
+
+                const headerResponse = await sheetsApiClient.spreadsheets.values.get({
+                  spreadsheetId: sheet.spreadsheetId,
+                  range: `${sheet.sheetName}!1:1`,
+                });
+
+                if (headerResponse.data.values && headerResponse.data.values[0]) {
+                  sheetsHeadersCache.set(headersCacheKey, headerResponse.data.values[0]);
+                  logger.timing(`Prefetched headers for ${sheet.sheetName} in ${Date.now() - sheetStart}ms`);
+                } else {
+                  logger.error(`Failed to prefetch headers for ${sheet.sheetName}: No data returned`);
+                }
+              } catch (error) {
+                logger.error(`Error prefetching headers for sheet ${sheet.spreadsheetId}/${sheet.sheetName}:`, error);
+                // We'll continue with other sheets and handle this one at runtime if needed
+              }
+            })
+          );
+
+          logger.timing(`Completed prefetching headers in ${Date.now() - prefetchStart}ms`);
+        }
+      }
+
+      logger.timing(`Initialization completed in ${Date.now() - initStart}ms`);
+      return true;
+    } catch (error) {
+      logger.error('Error during initialization:', error);
+      logger.warn('Continuing with partial initialization');
+      return false;
+    } finally {
+      isInitializing = false;
+    }
+  })();
+  
+  return initializationPromise;
 }
 
 // Load and cache configuration from YAML file
@@ -130,6 +160,10 @@ function loadConfig() {
   }
 
   try {
+    // Ensure dependencies are loaded
+    if (!fs) fs = require('fs');
+    if (!yaml) yaml = require('js-yaml');
+    
     const configFile = process.env.CONFIG_FILE_PATH || './config.yaml';
     logger.info(`Loading configuration from: ${configFile}`);
     const fileContents = fs.readFileSync(configFile, 'utf8');
@@ -186,6 +220,12 @@ function loadConfig() {
 // Pre-initialize Google auth client
 async function initGoogleAuth() {
   try {
+    // Ensure Google API is loaded
+    if (!google) {
+      const googleApi = require('googleapis');
+      google = googleApi.google;
+    }
+    
     // Reset the client if we're reinitializing
     if (googleAuthClient) {
       logger.debug('Re-initializing Google auth after previous initialization');
@@ -240,6 +280,11 @@ async function initGoogleAuth() {
 
 // Get cached Airtable base instance
 function getAirtableBase(apiKey, baseId) {
+  // Ensure Airtable is loaded
+  if (!Airtable) {
+    Airtable = require('airtable');
+  }
+  
   const cacheKey = `${apiKey}_${baseId}`;
 
   if (!airtableBaseCache.has(cacheKey)) {
@@ -663,16 +708,66 @@ function determineTargetBases(meetingTopic, config) {
 
 // Initialize the Express app
 const app = express();
-app.use(bodyParser.json());
 
-// Run initialization asynchronously on module load
-(async function () {
-  try {
-    await initialize();
-  } catch (error) {
-    logger.error('Error during async initialization:', error);
+// Parse JSON body early to make it available for validation middleware
+app.use(bodyParser.json({
+  limit: '1mb', // Smaller limit for faster parsing
+  verify: (req, res, buf) => {
+    // Store raw body for signature verification if needed
+    req.rawBody = buf;
   }
-})();
+}));
+
+// Schedule initialization to run asynchronously without blocking
+setTimeout(() => {
+  initialize().catch(error => {
+    logger.error('Error during async initialization:', error);
+  });
+}, 10); // tiny delay to ensure HTTP endpoint is ready first
+
+// Ultra-fast validation middleware that runs before everything else
+app.use(async (req, res, next) => {
+  // Only handle POST requests and only for URL validation
+  if (req.method !== 'POST' || req.body?.event !== 'endpoint.url_validation') {
+    return next();
+  }
+  
+  const startTime = Date.now();
+  const requestId = getRequestId();
+  res.setHeader('X-Request-ID', requestId);
+  
+  try {
+    logger.info('Zoom URL validation request received', {
+      requestId,
+      event: 'endpoint.url_validation'
+    });
+    
+    // Validate as quickly as possible
+    const hashForValidate = crypto.createHmac('sha256', process.env.ZOOM_WEBHOOK_SECRET_TOKEN)
+      .update(req.body.payload.plainToken).digest('hex');
+    
+    const response = {
+      plainToken: req.body.payload.plainToken,
+      encryptedToken: hashForValidate
+    };
+    
+    // Send response immediately
+    res.status(200).json(response);
+    logger.info(`Webhook validation completed in ${Date.now() - startTime}ms`, { 
+      requestId, 
+      event: 'endpoint.url_validation'
+    });
+  } catch (error) {
+    logger.error('Error handling URL validation challenge', {
+      requestId,
+      error: error.toString()
+    });
+    // Only send error response if we haven't sent one already
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Validation error' });
+    }
+  }
+});
 
 app.post('/', async (req, res) => {
   const startTime = Date.now();
@@ -688,6 +783,11 @@ app.post('/', async (req, res) => {
     // Extract event type and meeting ID if available for improved logging
     const eventType = req.body?.event || 'unknown';
     const meetingId = req.body?.payload?.object?.id || 'unknown';
+    
+    // Skip URL validation challenge (it was handled by middleware)
+    if (eventType === 'endpoint.url_validation') {
+      return;
+    }
     
     // Log initial request with request ID and event type
     logger.timing(`Webhook request received at ${new Date().toISOString()}`, { 
@@ -733,38 +833,6 @@ app.post('/', async (req, res) => {
         requestId, 
         eventType,
         meetingId
-      });
-      return;
-    }
-
-    // Handle Zoom validation challenge
-    if (req.body.event === 'endpoint.url_validation') {
-      logger.info('Zoom URL validation request received', {
-        requestId,
-        eventType,
-        meetingId
-      });
-      const validationStart = Date.now();
-      const hashForValidate = crypto.createHmac('sha256', process.env.ZOOM_WEBHOOK_SECRET_TOKEN)
-        .update(req.body.payload.plainToken).digest('hex');
-
-      response = {
-        message: {
-          plainToken: req.body.payload.plainToken,
-          encryptedToken: hashForValidate
-        },
-        status: 200
-      };
-
-      logger.timing(`Webhook validation response prepared in ${Date.now() - validationStart}ms`, { 
-        requestId, 
-        eventType: 'endpoint.url_validation'
-      });
-      res.status(response.status);
-      res.json(response.message);
-      logger.timing(`Webhook validation completed in ${Date.now() - startTime}ms`, { 
-        requestId, 
-        eventType: 'endpoint.url_validation'
       });
       return;
     }

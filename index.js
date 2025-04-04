@@ -968,26 +968,11 @@ async function processWebhook(body, headers, requestId) {
     });
 
     if (targetBases.length === 0) {
-      logger.info(`No matching destinations found for topic: "${meetingTopic}"`, {
+      logger.info(`No matching destinations found for meeting topic: "${meetingTopic}"`, {
         requestId,
         eventType,
-        meetingId,
-        meetingTopic
+        meetingId
       });
-
-      // Fallback to the environment variable settings if configured
-      if (process.env.AIRTABLE_API_KEY && process.env.AIRTABLE_BASE_ID && process.env.AIRTABLE_TABLE_ID) {
-        const fallbackBase = {
-          baseId: process.env.AIRTABLE_BASE_ID,
-          tableId: process.env.AIRTABLE_TABLE_ID
-        };
-        logger.info('Using fallback Airtable configuration from environment variables', {
-          requestId,
-          eventType,
-          meetingId
-        });
-        await saveToAirtable(record, fallbackBase, process.env.AIRTABLE_API_KEY, requestId);
-      }
       return;
     }
 
